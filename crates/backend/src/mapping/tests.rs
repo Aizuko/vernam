@@ -1722,8 +1722,15 @@ fn stickers_name_their_pack_and_syncs_install_packs() {
     };
     let dm = DataMessage { sticker: Some(sticker), timestamp: Some(100), ..Default::default() };
     let actions = map_content(&content(ALICE, dm), &ctx());
-    let [Action::Insert { sticker_pack, .. }] = actions.as_slice() else { panic!("{actions:?}") };
+    let [Action::Insert { message, sticker_pack, .. }] = actions.as_slice() else { panic!("{actions:?}") };
     assert_eq!(sticker_pack, &Some((vec![1; 16], vec![2; 32])));
+    // The attachment keeps it, for the pack's preview when it's clicked.
+    let attachment = &message.attachments[0];
+    assert!(attachment.sticker);
+    assert_eq!(
+        attachment.sticker_pack,
+        Some(signal_store::StickerPackRef { id: "01".repeat(16), key: "02".repeat(32) })
+    );
 
     use sync_message::{StickerPackOperation, sticker_pack_operation::Type};
     let sync = SyncMessage {

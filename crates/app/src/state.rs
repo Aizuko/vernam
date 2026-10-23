@@ -1260,6 +1260,11 @@ impl AppState {
                     cx.notify();
                 }
             }
+            Event::MessageStickerPack { pack: Some((id, key)), .. } => self.open_sticker_pack(id, key, cx),
+            Event::MessageStickerPack { message_id, pack: None } => {
+                tracing::info!(message_id, "a sticker whose pack isn't known");
+                cx.emit(AppEvent::Info("This sticker\u{2019}s pack isn\u{2019}t known.".into()));
+            }
             Event::StickerUpload(upload) => cx.emit(AppEvent::StickerUpload(upload)),
             Event::RecipientFound { query, result } if self.link_lookup.as_ref() == Some(&query) => {
                 self.link_lookup = None;
@@ -1524,6 +1529,17 @@ impl AppState {
         self.send(Command::PreviewStickerPack { id, key });
         cx.emit(AppEvent::OpenStickerPack);
         cx.notify();
+    }
+
+    /// A sticker in a message, clicked: its pack's preview (Desktop's
+    /// `showLightbox`, ts/state/ducks/lightbox.preload.ts). A sticker stored
+    /// before its attachment kept the pack is looked up in the message
+    /// presage stored.
+    pub fn open_message_sticker(&mut self, message_id: i64, pack: Option<&signal_store::StickerPackRef>, cx: &mut Context<Self>) {
+        match pack.and_then(|p| Some((hex::decode(&p.id).ok()?, hex::decode(&p.key).ok()?))) {
+            Some((id, key)) => self.open_sticker_pack(id, key, cx),
+            None => self.send(Command::FindMessageStickerPack { message_id }),
+        }
     }
 
     /// Reads the chat folders again.

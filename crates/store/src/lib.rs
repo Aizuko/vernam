@@ -302,6 +302,17 @@ pub struct AttachmentMeta {
     /// is downloaded (Desktop's `thumbnailFromBackup`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_path: Option<String>,
+    /// A sticker's pack, for its preview when the sticker is clicked
+    /// (Desktop keeps `message.sticker.packId` and `packKey`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker_pack: Option<StickerPackRef>,
+}
+
+/// A sticker's pack, by its hex id and key (as `StickerPackRow` has them).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StickerPackRef {
+    pub id: String,
+    pub key: String,
 }
 
 /// How a call went.

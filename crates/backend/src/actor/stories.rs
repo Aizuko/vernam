@@ -984,6 +984,7 @@ impl Actor {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         };
         Ok((pointer, meta))
     }

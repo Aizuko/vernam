@@ -284,6 +284,7 @@ async fn delete_edit_attachments_and_search() {
         voice: false,
         remote: None,
         thumbnail_path: None,
+        sticker_pack: None,
     }];
     m.quote = Some(Quote { author: None, author_name: "You".into(), sent_at: 0, text: "q".into(), thumbnail: None, attachment: None, story: false });
     let id = db.insert_message(&m).await.unwrap();
@@ -350,6 +351,7 @@ async fn the_next_audio_is_the_chats_next_message_with_audio() {
             voice: content_type == "audio/aac",
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         }];
         m
     };
@@ -489,6 +491,7 @@ async fn attachment_only_preview() {
         voice: false,
         remote: None,
         thumbnail_path: None,
+        sticker_pack: None,
     }];
     db.insert_message(&m).await.unwrap();
     assert_eq!(
@@ -978,6 +981,7 @@ async fn media_messages_are_those_with_attachments_or_previews() {
         voice: false,
         remote: None,
         thumbnail_path: None,
+        sticker_pack: None,
     }];
     let photo = db.insert_message(&photo).await.unwrap();
     let media: Vec<i64> = db.media_messages(&conv("d:a"), 10).await.unwrap().iter().map(|m| m.id).collect();
@@ -1652,6 +1656,7 @@ async fn attachments_are_named_as_desktop_names_them() {
         voice: false,
         remote: None,
         thumbnail_path: None,
+        sticker_pack: None,
     };
     let gif = AttachmentMeta { gif: true, ..meta("video/mp4") };
     assert_eq!(attachment_preview(&gif), "🎡 GIF", "a GIF is an MP4 with the GIF flag");
@@ -1705,6 +1710,7 @@ async fn stories_last_a_day_and_keep_views_and_replies() {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         },
         caption: String::new(),
         styles: Vec::new(),
@@ -2073,6 +2079,7 @@ fn photo(path: Option<&str>) -> AttachmentMeta {
         voice: false,
         remote: None,
         thumbnail_path: None,
+        sticker_pack: None,
     }
 }
 
@@ -2648,6 +2655,7 @@ async fn message_content_previews_and_gift_badge_states() {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         }),
         ..Default::default()
     };

@@ -324,6 +324,10 @@ pub enum Command {
     /// Opens a pack (Desktop's `StickerPreviewModal`, from the manager or a
     /// `signal.art` link): answered with `Event::StickerPackPreview`.
     PreviewStickerPack { id: Vec<u8>, key: Vec<u8> },
+    /// Finds the pack of a sticker message stored before its attachment
+    /// kept the pack, from the message presage stored: answered with
+    /// `Event::MessageStickerPack`.
+    FindMessageStickerPack { message_id: i64 },
     /// Installs a pack, here and on our other devices (a
     /// `StickerPackOperation` sync and its `InstalledStickerPackRecord`).
     InstallStickerPack { id: Vec<u8>, key: Vec<u8> },
@@ -1142,6 +1146,9 @@ pub enum Event {
     /// A pack opened, or why it couldn't be (Desktop's "Error opening
     /// sticker pack").
     StickerPackPreview { id: Vec<u8>, result: Result<stickers::StickerPackPreview, String> },
+    /// Answer to `Command::FindMessageStickerPack`: the pack's id and key,
+    /// if the stored message names one.
+    MessageStickerPack { message_id: i64, pack: Option<(Vec<u8>, Vec<u8>)> },
     /// Answer to `Command::FindRecipient`: who it is, or why not.
     RecipientFound { query: String, result: Result<signal_store::DirectoryEntry, String> },
     /// Answer to `Command::FetchLinkPreview` (`None`: no preview for it).

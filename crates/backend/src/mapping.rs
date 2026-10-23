@@ -985,6 +985,7 @@ pub fn attachment_meta(p: &AttachmentPointer) -> AttachmentMeta {
         voice: p.flags.unwrap_or(0) & attachment_pointer::Flags::VoiceMessage as u32 != 0,
         remote: None,
         thumbnail_path: None,
+        sticker_pack: None,
     }
 }
 
@@ -1215,6 +1216,11 @@ fn map_data_message(dm: &DataMessage, origin: Origin, ts: i64, ctx: &MapContext)
     };
     let sticker = dm.sticker.as_ref().and_then(|s| s.data.clone()).filter(|_| dm.body.is_none() && view_once.is_none());
     let is_sticker = sticker.is_some();
+    let sticker_pack = dm
+        .sticker
+        .as_ref()
+        .filter(|_| is_sticker)
+        .and_then(|s| Some((s.pack_id.clone().filter(|i| i.len() == 16)?, s.pack_key.clone().filter(|k| k.len() == 32)?)));
     let pointers: Vec<AttachmentPointer> =
         if erased { Vec::new() } else { normal_attachments(dm).cloned().chain(sticker).collect() };
     // A poll's body is its question, never a long text.
@@ -1276,6 +1282,7 @@ fn map_data_message(dm: &DataMessage, origin: Origin, ts: i64, ctx: &MapContext)
                 let mut metas: Vec<AttachmentMeta> = pointers.iter().map(attachment_meta).collect();
                 if is_sticker && let Some(last) = metas.last_mut() {
                     last.sticker = true;
+                    last.sticker_pack = sticker_pack.as_ref().map(|(id, key)| signal_store::StickerPackRef { id: hex::encode(id), key: hex::encode(key) });
                 }
                 metas
             },
@@ -1295,11 +1302,7 @@ fn map_data_message(dm: &DataMessage, origin: Origin, ts: i64, ctx: &MapContext)
         sent_to: Vec::new(),
         content,
         content_image,
-        sticker_pack: dm
-            .sticker
-            .as_ref()
-            .filter(|_| is_sticker)
-            .and_then(|s| Some((s.pack_id.clone().filter(|i| i.len() == 16)?, s.pack_key.clone().filter(|k| k.len() == 32)?))),
+        sticker_pack,
     }]
 }
 

@@ -348,6 +348,7 @@ mod tests {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         }
     }
 

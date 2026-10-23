@@ -205,6 +205,7 @@ async fn seed(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         })
     };
     let photo = image("demo-photo.png", PHOTO_WIDTH, PHOTO_HEIGHT);
@@ -319,6 +320,7 @@ async fn seed(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             voice: true,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         }];
         db.insert_message(&voice).await?;
         // A second one straight after: Desktop plays it when the first ends.
@@ -424,6 +426,7 @@ async fn seed(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         }];
         db.insert_message(&gif).await?;
     }
@@ -774,6 +777,7 @@ async fn seed_stories(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         };
         let content = StoryContent::Media { attachment: photo, caption: "Golden hour".into(), styles: Vec::new() };
         db.insert_story(&story(Some(JORDAN), Some("Jordan Reyes"), 5 * HOUR, None, content), now).await?;
@@ -1226,6 +1230,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                             voice: false,
                             remote: None,
                             thumbnail_path: None,
+                            sticker_pack: None,
                         })
                     });
                     LinkPreview { url: draft.url, title: Some(draft.title), description: draft.description, date: draft.date, image }
@@ -1697,6 +1702,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         voice: false,
                         remote: None,
                         thumbnail_path: None,
+                        sticker_pack: None,
                     }],
                     link_preview: None,
                     expires_in: 0,
@@ -1707,6 +1713,10 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
             }
             Command::LoadStickers => emit(Event::Stickers(demo_stickers_installed(&db, &data_dir).await)),
             Command::LoadStickerManager => emit(Event::StickerManager(demo_sticker_manager(&db, &data_dir).await)),
+            // The demo's stickers keep their pack on the attachment.
+            Command::FindMessageStickerPack { message_id } => {
+                let _ = events.unbounded_send(Event::MessageStickerPack { message_id, pack: None });
+            }
             Command::PreviewStickerPack { id, key: _ } => {
                 let installed = demo_installed_ids(&db).await;
                 let result = demo_all_stickers(&data_dir)
@@ -1757,7 +1767,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                     let _ = events.unbounded_send(Event::StickerUpload(StickerUpload::Done { pack_id, pack_key, url }));
                 });
             }
-            Command::SendSticker { conversation, pack: _, sticker, quote } => {
+            Command::SendSticker { conversation, pack, sticker, quote } => {
                 let quote = demo_quote(&db, quote).await;
                 let sent_at = next_sent_at();
                 let msg = NewMessage {
@@ -1782,6 +1792,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         voice: false,
                         remote: None,
                         thumbnail_path: None,
+                        sticker_pack: Some(signal_store::StickerPackRef { id: hex::encode(&pack.id), key: hex::encode(&pack.key) }),
                     }],
                     link_preview: None,
                     expires_in: 0,
@@ -1844,6 +1855,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         voice: false,
                         remote: None,
                         thumbnail_path: None,
+                        sticker_pack: None,
                     });
                 }
                 if attachments.is_empty() {
@@ -1907,6 +1919,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         voice: file.voice,
                         remote: None,
                         thumbnail_path: None,
+                        sticker_pack: None,
                     }],
                     link_preview: None,
                     expires_in: 0,
@@ -2024,6 +2037,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                                     voice: false,
                                     remote: None,
                                     thumbnail_path: None,
+                                    sticker_pack: None,
                                 },
                                 caption: caption.clone(),
                                 styles: styles.clone(),

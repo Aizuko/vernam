@@ -897,6 +897,10 @@ impl Actor {
                 }
                 Command::LoadStickerManager => self.load_sticker_manager().await,
                 Command::PreviewStickerPack { id, key } => self.preview_sticker_pack(id, key).await,
+                Command::FindMessageStickerPack { message_id } => {
+                    let pack = self.message_sticker_pack(message_id).await;
+                    self.emit(Event::MessageStickerPack { message_id, pack });
+                }
                 Command::InstallStickerPack { id, key } => self.install_sticker_pack_ui(id, key).await,
                 Command::UninstallStickerPack { id, key } => self.uninstall_sticker_pack_ui(id, key).await,
                 Command::OrderStickerPacks(ids) => self.order_sticker_packs(ids).await,
@@ -2801,6 +2805,7 @@ impl Actor {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         };
         let Some((id, data, timestamp)) = self.store_outgoing(&conversation, String::new(), quote, vec![meta], None).await
         else {
@@ -2864,6 +2869,7 @@ impl Actor {
             voice: false,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: Some(signal_store::StickerPackRef { id: hex::encode(&pack.id), key: hex::encode(&pack.key) }),
         };
         let Some((id, mut data, timestamp)) = self.store_outgoing(&conversation, String::new(), quote, vec![meta], None).await
         else {
@@ -3906,6 +3912,7 @@ impl Actor {
                                 voice: false,
                                 remote: None,
                                 thumbnail_path: None,
+                                sticker_pack: None,
                             })
                         }
                     }
@@ -4023,6 +4030,7 @@ impl Actor {
                 voice: false,
                 remote: None,
                 thumbnail_path: None,
+                sticker_pack: None,
             });
             files.push(Upload { path, file_name: image.file_name, file_type: None, voice: false });
         }
@@ -4103,6 +4111,7 @@ impl Actor {
             voice: file.voice,
             remote: None,
             thumbnail_path: None,
+            sticker_pack: None,
         };
         let wire_caption = caption.trim_end().to_owned();
         let wire_styles = mapping::wire_styles(&wire_caption, &styles);
@@ -5246,6 +5255,27 @@ impl Actor {
     }
 
     // ------------------------------------------------------------ attachments
+
+    /// A sticker message's pack, from the message presage stored (Desktop
+    /// keeps `message.sticker`; ours kept only the image until the
+    /// attachment held its pack).
+    async fn message_sticker_pack(&self, message_id: i64) -> Option<(Vec<u8>, Vec<u8>)> {
+        let manager = self.manager()?;
+        let message = self.db.message(message_id).await.ok().flatten()?;
+        let thread = match message.conversation_id.as_group() {
+            Some(key) => Thread::Group(key.try_into().ok()?),
+            None => Thread::Contact(mapping::service_id_of(&message.conversation_id)?),
+        };
+        let content = match manager.store().message(&thread, message.sent_at as u64).await {
+            Ok(content) => content?,
+            Err(error) => {
+                warn!(%error, "couldn't read a sticker's message");
+                return None;
+            }
+        };
+        let sticker = data_message_of(&content.body)?.sticker.as_ref()?;
+        Some((sticker.pack_id.clone().filter(|i| i.len() == 16)?, sticker.pack_key.clone().filter(|k| k.len() == 32)?))
+    }
 
     async fn fetch_attachment(self: Rc<Self>, message_id: i64, index: usize) {
         let Some(manager) = self.manager() else { return };

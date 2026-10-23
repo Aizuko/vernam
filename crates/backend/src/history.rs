@@ -927,6 +927,9 @@ async fn import_item(
         Some(Item::StickerMessage(sticker)) => {
             let mut meta = sticker.sticker.data.as_ref().map(attachment).unwrap_or_else(|| attachment(&Default::default()));
             meta.sticker = true;
+            let pack = &sticker.sticker;
+            meta.sticker_pack = (pack.packId.len() == 16 && pack.packKey.len() == 32)
+                .then(|| signal_store::StickerPackRef { id: hex::encode(&pack.packId), key: hex::encode(&pack.packKey) });
             let message = NewMessage {
                 conversation_id: conversation.clone(),
                 sent_at: item.dateSent as i64,
@@ -1256,6 +1259,7 @@ fn attachment(pointer: &proto::FilePointer) -> AttachmentMeta {
         voice: false,
         remote: locator.and_then(remote),
         thumbnail_path: None,
+        sticker_pack: None,
     }
 }
 
@@ -1565,6 +1569,14 @@ mod tests {
             item: Some(proto::frame::Item::ChatItem(item(20, 2, 3_000, true, Item::RemoteDeletedMessage(Default::default())))),
             ..Default::default()
         });
+        // A sticker from Alice, naming its pack.
+        let mut sticker = proto::StickerMessage::new();
+        sticker.sticker.mut_or_insert_default().packId = vec![0xab; 16];
+        sticker.sticker.mut_or_insert_default().packKey = vec![0xcd; 32];
+        push(proto::Frame {
+            item: Some(proto::frame::Item::ChatItem(item(20, 2, 3_500, true, Item::StickerMessage(sticker)))),
+            ..Default::default()
+        });
         let mut gone = item(10, 1, 4_000, false, Item::StandardMessage({
             let mut s = proto::StandardMessage::new();
             s.text = Some(text("disappeared")).into();
@@ -1617,7 +1629,7 @@ mod tests {
         // Progress only moves forward and ends at the whole backup.
         assert!(seen.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(seen.last(), Some(&(plain.len() as u64)));
-        assert_eq!((imported.chats, imported.messages), (4, 6));
+        assert_eq!((imported.chats, imported.messages), (4, 7));
         assert_eq!(imported.sticker_packs, vec![(vec![0xab; 16], vec![0xcd; 32])]);
         // Each setting the backup leaves off is off, as Desktop imports them.
         let settings = imported.settings.clone().unwrap();
@@ -1697,6 +1709,12 @@ mod tests {
         // The photo whole; the video's backup thumbnail.
         assert_eq!(imported.downloads, vec![(reply.id, 0), (reply.id, 1)]);
         assert!(with_alice[1].deleted);
+        let sticker = &with_alice[2].attachments[0];
+        assert!(sticker.sticker);
+        assert_eq!(
+            sticker.sticker_pack,
+            Some(signal_store::StickerPackRef { id: "ab".repeat(16), key: "cd".repeat(32) })
+        );
 
         // The phone's release notes are the Signal chat's.
         let signal = db.conversation(&ConversationId::signal()).await.unwrap().unwrap();
