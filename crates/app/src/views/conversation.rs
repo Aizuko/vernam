@@ -1951,11 +1951,31 @@ impl ConversationView {
     /// scrolled up: "@" with how many mentions of us haven't been seen,
     /// over the arrow with how many messages arrived meanwhile.
     fn render_scroll_down_buttons(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        // The count is the circle's sibling, not its child: a div paints its
+        // border after its children, which drew the ring across the count.
+        // Both sit in the clickable wrapper, so the count can be clicked too.
+        let badge = |count: usize| {
+            (count > 0).then(|| {
+                div()
+                    .absolute()
+                    .top(px(-6.))
+                    .right(px(-6.))
+                    .min_w(px(20.))
+                    .h(px(20.))
+                    .px_1()
+                    .rounded_full()
+                    .bg(palette.badge)
+                    .text_color(palette.on_accent)
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(badge_count(count))
+            })
+        };
         let button = |id: &'static str, icon: IconName, count: usize| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .relative()
+            let circle = div()
                 .size(px(40.))
                 .flex()
                 .items_center()
@@ -1965,28 +1985,14 @@ impl ConversationView {
                 .border_1()
                 .border_color(palette.panel_border)
                 .shadow_md()
+                .child(Icon::new(icon).size_5().text_color(palette.text));
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .relative()
                 .cursor_pointer()
-                .child(Icon::new(icon).size_5().text_color(palette.text))
-                .when(count > 0, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-6.))
-                            .right(px(-6.))
-                            .min_w(px(20.))
-                            .h(px(20.))
-                            .px_1()
-                            .rounded_full()
-                            .bg(palette.badge)
-                            .text_color(palette.on_accent)
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(badge_count(count)),
-                    )
-                })
+                .child(circle)
+                .children(badge(count))
         };
         div()
             .absolute()
