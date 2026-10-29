@@ -5920,6 +5920,7 @@ source = "git+https://github.com/whisperfish/rusqlite?rev=2a42b3354c9194700d08aa
 dependencies = [
  "cc",
  "pkg-config",
+ "sqlcipher-crypto-provider",
  "vcpkg",
 ]
 
@@ -9956,6 +9957,20 @@ dependencies = [
  "sha2 0.11.1",
  "sorted-vec",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sqlcipher-crypto-provider"
+version = "0.1.0"
+source = "git+https://github.com/whisperfish/rusqlite?rev=2a42b3354c9194700d08aa070f70a131a470e7dc#2a42b3354c9194700d08aa070f70a131a470e7dc"
+dependencies = [
+ "aes 0.8.4",
+ "cbc 0.1.2",
+ "hmac 0.12.1",
+ "pbkdf2",
+ "rand 0.10.3",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
 ]
 
 [[package]]

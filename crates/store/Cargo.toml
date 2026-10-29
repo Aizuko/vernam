@@ -18,6 +18,13 @@ tracing.workspace = true
 # Poll limits count characters as Desktop does: graphemes.
 unicode-segmentation = "1"
 
+# Elsewhere than macOS (where SQLCipher uses CommonCrypto), SQLCipher's
+# crypto in Rust rather than OpenSSL: libsignal links BoringSSL, whose
+# libcrypto the linker finds first and which lacks OpenSSL 3's EVP_CIPHER_get_*
+# that SQLCipher calls. The database format is the same either way.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+libsqlite3-sys = { workspace = true, features = ["bundled-sqlcipher-custom-crypto"] }
+
 [dev-dependencies]
 tokio.workspace = true
 tempfile = "3"
