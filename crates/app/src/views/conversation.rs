@@ -63,6 +63,11 @@ pub struct ConversationView {
     reaction_viewer_closed_by: ClosedByClick,
     /// Newer messages exist past the last loaded one (after jumping back).
     has_newer: bool,
+    /// A page that will replace the list loading (its generation), and the
+    /// messages that changed meanwhile: they're replayed on the new list, or
+    /// one saved after the page was read (a message just sent) would be lost.
+    reloading: Option<u64>,
+    changed_while_loading: Vec<i64>,
     /// Bumped by each full reload; page results from an older one are stale.
     generation: u64,
     loading_newer: bool,
@@ -271,11 +276,7 @@ impl ConversationView {
                 }
             }),
             cx.subscribe_in(&composer, window, |this, _, event: &ComposerEvent, window, cx| match event {
-                ComposerEvent::Sent => {
-                    this.list.set_follow_mode(FollowMode::Tail);
-                    this.list.scroll_to_end();
-                    cx.notify();
-                }
+                ComposerEvent::Sent => this.scroll_to_newest(cx),
                 ComposerEvent::EditLast => {
                     if this.ended(cx) {
                         return;
@@ -338,6 +339,8 @@ impl ConversationView {
             window_active: window.is_window_active(),
             image_cache: LruImageCache::new(cx),
             has_newer: false,
+            reloading: None,
+            changed_while_loading: Vec::new(),
             generation: 0,
             loading_newer: false,
             highlight: None,
@@ -1034,6 +1037,20 @@ impl ConversationView {
         self.unread_mentions.clear();
     }
 
+    /// Down to the newest message, reloading them if we jumped back, and
+    /// read them. A scroll in code doesn't call the scroll handler, which is
+    /// what reads the chat when it reaches the bottom.
+    fn scroll_to_newest(&mut self, cx: &mut Context<Self>) {
+        if self.has_newer {
+            self.load_initial(cx);
+        } else {
+            self.list.set_follow_mode(FollowMode::Tail);
+            self.list.scroll_to_end();
+        }
+        self.caught_up(cx);
+        cx.notify();
+    }
+
     /// Desktop's "@" button: the oldest mention of us not yet seen.
     fn jump_to_mention(&mut self, cx: &mut Context<Self>) {
         if self.unread_mentions.is_empty() {
@@ -1053,6 +1070,7 @@ impl ConversationView {
         self.loading_older = true;
         self.generation += 1;
         let generation = self.generation;
+        self.reloading = Some(generation);
         let backend = self.state.read(cx).backend.clone();
         let db = backend.db().clone();
         let id = self.id.clone();
@@ -1080,10 +1098,28 @@ impl ConversationView {
                     }
                     Err(e) => tracing::error!("loading messages: {e}"),
                 }
+                this.replay_changes(generation, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// The page of `generation` landed: the changes held while it loaded
+    /// apply to it. A later page replacing it replays them instead.
+    fn replay_changes(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.reloading == Some(generation) {
+            self.reloading = None;
+            let changed = std::mem::take(&mut self.changed_while_loading);
+            // One that arrived as the page was read is in it, and replaying
+            // only updates its row: read it if it's in view.
+            if !changed.is_empty() && self.window_active && self.at_end() {
+                self.state.read(cx).send(Command::MarkRead { conversation: self.id.clone() });
+            }
+            for id in changed {
+                self.on_message_changed(id, cx);
+            }
+        }
     }
 
     /// Opens the chat at its oldest unread message, under Desktop's "N Unread
@@ -1094,6 +1130,8 @@ impl ConversationView {
         self.loading_older = true;
         self.generation += 1;
         let generation = self.generation;
+        // The loader it hands over to replays what changed meanwhile.
+        self.reloading = Some(generation);
         let state = self.state.read(cx);
         let me = state.account.as_ref().map(|a| a.aci.clone()).unwrap_or_default();
         let backend = state.backend.clone();
@@ -1157,6 +1195,7 @@ impl ConversationView {
         self.loading_older = true;
         self.generation += 1;
         let generation = self.generation;
+        self.reloading = Some(generation);
         let backend = self.state.read(cx).backend.clone();
         let db = backend.db().clone();
         let id = self.id.clone();
@@ -1165,56 +1204,70 @@ impl ConversationView {
         cx.spawn(async move |this, cx| {
             let result = query.await;
             let _ = this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return;
-                }
-                this.loading_older = false;
-                let Ok(messages) = result else { return };
-                let Some(ix) = messages.iter().position(|m| m.id == message_id) else { return };
-                this.has_more = ix as u32 == half;
-                this.has_newer = (messages.len() - ix - 1) as u32 == half;
-                this.messages = messages;
-                this.start_seen();
-                // The message jumped to is never folded away.
-                this.list.reset(this.messages.len() + 1);
-                this.relayout(cx);
-                if let Slot::Head { set, .. } | Slot::Folded { set } = this.slot(message_id) {
-                    this.expanded.insert(set);
-                    this.relayout(cx);
-                }
-                this.list.set_follow_mode(FollowMode::Normal);
-                if landing == Landing::Unread {
-                    // The unread line at the top, as Desktop scrolls it into
-                    // view; with little unread, the list stops at the end.
-                    this.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
-                    if std::mem::take(&mut this.read_after_load) {
-                        this.mark_read(cx);
-                    }
-                    cx.notify();
-                    return;
-                }
-                // A little context above it.
-                this.list.scroll_to(ListOffset { item_ix: ix.saturating_sub(2), offset_in_item: px(0.) });
-                this.highlight = Some(message_id);
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(HIGHLIGHT).await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.highlight == Some(message_id) {
-                            this.highlight = None;
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-                cx.notify();
+                this.land_around(result, message_id, landing, generation, cx);
+                this.replay_changes(generation, cx);
             });
         })
         .detach();
     }
 
+    fn land_around(
+        &mut self,
+        result: Result<Vec<Message>, signal_store::Error>,
+        message_id: i64,
+        landing: Landing,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let half = PAGE / 2;
+        if self.generation != generation {
+            return;
+        }
+        self.loading_older = false;
+        let Ok(messages) = result else { return };
+        let Some(ix) = messages.iter().position(|m| m.id == message_id) else { return };
+        self.has_more = ix as u32 == half;
+        self.has_newer = (messages.len() - ix - 1) as u32 == half;
+        self.messages = messages;
+        self.start_seen();
+        // The message jumped to is never folded away.
+        self.list.reset(self.messages.len() + 1);
+        self.relayout(cx);
+        if let Slot::Head { set, .. } | Slot::Folded { set } = self.slot(message_id) {
+            self.expanded.insert(set);
+            self.relayout(cx);
+        }
+        self.list.set_follow_mode(FollowMode::Normal);
+        if landing == Landing::Unread {
+            // The unread line at the top, as Desktop scrolls it into
+            // view; with little unread, the list stops at the end.
+            self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+            if std::mem::take(&mut self.read_after_load) {
+                self.mark_read(cx);
+            }
+            cx.notify();
+            return;
+        }
+        // A little context above it.
+        self.list.scroll_to(ListOffset { item_ix: ix.saturating_sub(2), offset_in_item: px(0.) });
+        self.highlight = Some(message_id);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HIGHLIGHT).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.highlight == Some(message_id) {
+                    this.highlight = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// The next page of newer messages, after jumping back.
     fn load_newer(&mut self, cx: &mut Context<Self>) {
-        if self.loading_newer || !self.has_newer {
+        // A page replacing the list is on its way; this one would add to it.
+        if self.loading_newer || !self.has_newer || self.reloading.is_some() {
             return;
         }
         let Some(last) = self.messages.last().map(|m| m.id) else { return };
@@ -1301,6 +1354,10 @@ impl ConversationView {
         cx.spawn(async move |this, cx| {
             let Ok(Some(message)) = query.await else { return };
             let _ = this.update(cx, |this, cx| {
+                if this.reloading.is_some() {
+                    this.changed_while_loading.push(message.id);
+                    return;
+                }
                 if let Some(ix) = this.messages.iter().position(|m| m.id == message.id) {
                     this.messages[ix] = message;
                     // The next one too: reactions decide whether it starts a
@@ -2010,18 +2067,8 @@ impl ConversationView {
             })
             .child(
                 // How many arrived while you were scrolled up.
-                button("jump-to-latest", IconName::ArrowDown, self.unseen).on_click(cx.listener(|this, _, _, cx| {
-                    if this.has_newer {
-                        // Jumped back: reload the newest.
-                        this.load_initial(cx);
-                        this.caught_up(cx);
-                        return;
-                    }
-                    this.list.set_follow_mode(FollowMode::Tail);
-                    this.list.scroll_to_end();
-                    this.caught_up(cx);
-                    cx.notify();
-                })),
+                button("jump-to-latest", IconName::ArrowDown, self.unseen)
+                    .on_click(cx.listener(|this, _, _, cx| this.scroll_to_newest(cx))),
             )
     }
 
@@ -5415,6 +5462,7 @@ impl ConversationView {
             self.target(last, window, cx);
         }
         self.list.scroll_to_end();
+        self.caught_up(cx);
     }
 
     /// Desktop's ⌘J: the oldest message that was unread when the chat
@@ -6377,6 +6425,72 @@ mod tests {
         settle(&mut cx);
         assert_eq!(unread(&backend), 0);
         assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
+
+        // Sending and End take you down too, which reads it: the list
+        // doesn't call its scroll handler for a scroll in code.
+        let scroll_up_and_arrive = |cx: &mut VisualTestContext, sent_at: i64| {
+            view.update(cx, |v, _| {
+                v.list.set_follow_mode(FollowMode::Normal);
+                v.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
+            });
+            for _ in 0..50 {
+                settle(cx);
+                if !view.read_with(cx, |v, _| v.at_end()) {
+                    break;
+                }
+            }
+            assert!(!view.read_with(cx, |v, _| v.at_end()), "scrolled up");
+            arrive(cx, &backend, sent_at);
+            settle(cx);
+            assert_eq!(unread(&backend), 1);
+            assert_eq!(view.read_with(cx, |v, _| v.unseen), 1);
+        };
+        scroll_up_and_arrive(&mut cx, chrono::Utc::now().timestamp_millis() + 2);
+        let composer = view.read_with(&cx, |v, _| v.composer.clone());
+        composer.update(&mut cx, |_, cx| cx.emit(ComposerEvent::Sent));
+        settle(&mut cx);
+        assert_eq!(unread(&backend), 0);
+        assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
+
+        scroll_up_and_arrive(&mut cx, chrono::Utc::now().timestamp_millis() + 3);
+        cx.update(|window, cx| view.update(cx, |v, cx| v.target_last(window, cx)));
+        settle(&mut cx);
+        assert_eq!(unread(&backend), 0);
+        assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
+
+        // Jumped back, sending loads the newest. The sent message is saved
+        // after the page is read, and still shows.
+        view.update(&mut cx, |v, _| v.has_newer = true);
+        composer.update(&mut cx, |_, cx| cx.emit(ComposerEvent::Sent));
+        assert!(view.read_with(&cx, |v, _| v.reloading.is_some()));
+        let sent_at = chrono::Utc::now().timestamp_millis() + 4;
+        let db = backend.db().clone();
+        let sent = signal_store::NewMessage {
+            conversation_id: ConversationId(MAYA.into()),
+            sent_at,
+            received_at: sent_at,
+            direction: Direction::Outgoing,
+            author: None,
+            author_name: None,
+            body: "sent while jumped back".into(),
+            status: DeliveryStatus::Sent,
+            quote: None,
+            attachments: vec![],
+            link_preview: None,
+            expires_in: 0,
+        };
+        let id = futures::executor::block_on(backend.spawn(async move { db.insert_message(&sent).await })).unwrap();
+        view.update(&mut cx, |v, cx| v.on_message_changed(id, cx));
+        for _ in 0..50 {
+            settle(&mut cx);
+            if view.read_with(&cx, |v, _| !v.has_newer) {
+                break;
+            }
+        }
+        view.read_with(&cx, |v, _| {
+            assert!(!v.has_newer && v.reloading.is_none());
+            assert_eq!(v.messages.last().map(|m| m.id), Some(id));
+        });
         backend.shutdown();
     }
 
