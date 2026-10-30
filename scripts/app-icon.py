@@ -7,6 +7,8 @@
 # square at 100 with continuous corners (a superellipse here) and a soft
 # shadow below. The artwork's own square is cut out, scaled to 824, and
 # given that shape, so its margins, corners and background don't matter.
+# Artwork without transparency counts the white around its square as
+# background (only white reached from the edges: white inside stays).
 import math
 import sys
 from pathlib import Path
@@ -35,6 +37,31 @@ def squircle(size: int, exponent: float = 5.0, supersample: int = 4) -> Image.Im
     return mask.resize((size, size), Image.LANCZOS)
 
 
+def reached_from_edges(candidates: np.ndarray) -> np.ndarray:
+    """Which of `candidates` (a bool mask) connect to the image's border."""
+    # A copy: an image made from an array doesn't keep the fill's writes.
+    mask = Image.fromarray(np.uint8(candidates * 255), "L").copy()
+    w, h = mask.size
+    for x, y in [(x, 0) for x in range(w)] + [(x, h - 1) for x in range(w)] + [(0, y) for y in range(h)] + [(w - 1, y) for y in range(h)]:
+        if mask.getpixel((x, y)) == 255:
+            ImageDraw.floodfill(mask, (x, y), 128)
+    return np.asarray(mask) == 128
+
+
+def shaved(image: Image.Image, rim: int = 6) -> Image.Image:
+    """`image` with the `rim` pixels along its outer edge made transparent,
+    for `filled` to replace: artwork edges carry a light halo that would
+    show as a line inside the shape. Holes in the artwork stay as drawn.
+    On the whole canvas, before cropping: the crop ends at the halo, which
+    then has no transparent neighbor."""
+    alpha = np.asarray(image.getchannel("A"))
+    outside = Image.fromarray(np.uint8(reached_from_edges(alpha <= 200) * 255), "L")
+    rim_or_outside = np.asarray(outside.filter(ImageFilter.MaxFilter(2 * rim + 1))) == 255
+    image = image.copy()
+    image.putalpha(Image.fromarray(np.where(rim_or_outside, 0, alpha).astype(np.uint8), "L"))
+    return image
+
+
 def filled(image: Image.Image) -> Image.Image:
     """`image` opaque: where it's transparent (outside its own corners), the
     colors nearest, spread by ever wider blurs of the premultiplied image."""
@@ -56,11 +83,23 @@ def filled(image: Image.Image) -> Image.Image:
     return Image.fromarray(np.uint8(np.clip(rgb, 0, 1) * 255 + 0.5), "RGB").convert("RGBA")
 
 
-art = Image.open(source).convert("RGBA")
+def white_surround_cleared(image: Image.Image, tolerance: int = 40) -> Image.Image:
+    """`image` with the near-white reached from its edges made transparent,
+    when it has no transparency of its own."""
+    if image.getchannel("A").getextrema()[0] < 255:
+        return image
+    rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    background = reached_from_edges(np.abs(rgb - 255).max(axis=2) <= tolerance)
+    out = np.asarray(image).copy()
+    out[..., 3] = np.where(background, 0, 255)
+    return Image.fromarray(out, "RGBA")
+
+
+art = white_surround_cleared(Image.open(source).convert("RGBA"))
 # The artwork's square: what's nearly opaque. Fainter pixels around it
 # (antialiasing, stray haze) are left out.
 square = art.getchannel("A").point(lambda a: 255 if a > 200 else 0).getbbox()
-body = filled(art.crop(square)).resize((BODY, BODY), Image.LANCZOS)
+body = filled(shaved(art).crop(square)).resize((BODY, BODY), Image.LANCZOS)
 shape = squircle(BODY)
 body.putalpha(shape)
 
