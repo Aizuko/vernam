@@ -1379,7 +1379,12 @@ impl ConversationView {
             self.expanded.insert(set);
             self.relayout(cx);
         }
-        self.list.set_follow_mode(FollowMode::Normal);
+        if self.has_newer {
+            // Following the end of a partial page would skip the pages after it.
+            self.list.set_follow_mode(FollowMode::Normal);
+        } else {
+            self.follow_from_end();
+        }
         if landing == Landing::Unread {
             // The unread line at the top, as Desktop scrolls it into
             // view; with little unread, the list stops at the end.
@@ -1404,6 +1409,19 @@ impl ConversationView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Follow the end once the list is scrolled to it (the typing bubble,
+    /// a newest message that grows as its image loads), without moving it
+    /// now: the paused `Tail` a scroll up leaves, which the list resumes
+    /// itself. Not while newer messages wait to load (`FollowMode::Normal`).
+    fn follow_from_end(&self) {
+        if self.list.is_following_tail() {
+            return;
+        }
+        let top = self.list.logical_scroll_top();
+        self.list.set_follow_mode(FollowMode::Tail);
+        self.list.scroll_to(top);
     }
 
     /// The next page of newer messages, after jumping back.
@@ -1431,6 +1449,7 @@ impl ConversationView {
                 if !this.has_newer {
                     // The newest message is loaded: the typing bubble may show.
                     this.remeasure_typing(cx);
+                    this.follow_from_end();
                 }
                 if newer.is_empty() {
                     return;
@@ -1527,10 +1546,12 @@ impl ConversationView {
                     this.fresh.insert(message.id);
                     this.messages.insert(ix, message);
                     this.list.splice(ix..ix, 1);
-                    // At the bottom after a jump (which stops following),
-                    // follow again, or the new one lands out of sight.
-                    // Not while the scrollbar's thumb is held: the snap would
-                    // pull the list from under it.
+                    // The newest on screen but not the very end (a jump or a
+                    // scroll up stopped following): follow again, or the new
+                    // one lands out of sight.
+                    // Not while the scrollbar's thumb is held short of the
+                    // end: the snap would pull the list from under it. (Held
+                    // at the end, the list follows by itself.)
                     if was_at_end && !this.list.is_following_tail() && !this.list.is_scrollbar_dragging() {
                         this.list.set_follow_mode(FollowMode::Tail);
                     }
@@ -1542,7 +1563,7 @@ impl ConversationView {
                         // Read now if you're looking at the bottom of the chat;
                         // otherwise it waits for you to scroll down.
                         // Following, so it shows (not while the thumb is
-                        // held at the bottom after a jump).
+                        // held short of the very end).
                         if was_at_end && this.list.is_following_tail() && this.window_active {
                             this.state.read(cx).send(Command::MarkRead { conversation: this.id.clone() });
                         } else {
@@ -6688,14 +6709,28 @@ mod tests {
         assert!(view.read_with(&cx, |v, _| v.newest_in_view()), "shown whole");
         assert_eq!(unread(&backend), 0);
         assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
-        // At the bottom after the jump, which stopped the list following, a
-        // message that comes is read only because it's shown.
+        // Down at the end, the list follows it again (the typing bubble,
+        // an image loading), though the jump stopped it.
+        assert!(view.read_with(&cx, |v, _| v.list.is_following_tail()), "following");
+        // So a message that comes after the jump shows, and is read.
         arrive(&mut cx, &backend, chrono::Utc::now().timestamp_millis() + 9);
         settle(&mut cx);
         assert!(view.read_with(&cx, |v, _| v.newest_in_view()), "follows");
         assert_eq!(unread(&backend), 0);
         cx.simulate_resize(size(px(900.), px(260.)));
         settle(&mut cx);
+        // Paging down after a jump back follows again once the last page
+        // lands, even an empty one (the page before it was full).
+        view.update(&mut cx, |v, cx| {
+            v.has_newer = true;
+            v.list.set_follow_mode(FollowMode::Normal);
+            v.load_newer(cx);
+        });
+        settle(&mut cx);
+        view.read_with(&cx, |v, _| {
+            assert!(!v.has_newer);
+            assert!(v.list.is_following_tail(), "following after the last page");
+        });
 
         // Jumped back, sending loads the newest. The sent message is saved
         // after the page is read, and still shows.
