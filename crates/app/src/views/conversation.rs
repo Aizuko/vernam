@@ -5583,7 +5583,24 @@ impl ConversationView {
     fn target(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(message) = self.messages.get(ix) else { return };
         self.targeted = Some(message.id);
-        self.list.scroll_to_reveal_item(ix);
+        let viewport = self.list.viewport_bounds();
+        let shown = self
+            .list
+            .bounds_for_item(ix)
+            .is_some_and(|row| row.top() >= viewport.top() - px(1.) && row.bottom() <= viewport.bottom() + px(1.));
+        // `scroll_to_reveal_item` can move the list even for a row already
+        // on screen (and this runs on mouse down), so only for one that isn't.
+        if !shown {
+            if ix + 1 == self.messages.len() && !self.has_newer {
+                // The very end, so the typing bubble shows and the list follows.
+                self.list.scroll_to_end();
+            } else {
+                // Following would snap the list back to the end at its next
+                // layout; paused, it follows again once it's back at the bottom.
+                self.list.pause_following_tail();
+                self.list.scroll_to_reveal_item(ix);
+            }
+        }
         window.focus(&self.timeline_focus, cx);
         cx.notify();
     }
@@ -6764,6 +6781,50 @@ mod tests {
         view.read_with(&cx, |v, _| {
             assert!(!v.has_newer && v.reloading.is_none());
             assert_eq!(v.messages.last().map(|m| m.id), Some(id));
+        });
+        backend.shutdown();
+    }
+
+    #[gpui_kit::test]
+    fn arrowing_up_from_the_bottom_stays_on_the_message(cx: &mut TestAppContext) {
+        let (backend, _dir) = demo_backend(cx);
+        wait_for_messages(&backend, MAYA, 1, |m| m.body == MAYA_LAST);
+        let (mut cx, view) = open_view_sized(cx, &backend, MAYA, 260.);
+        let settle = |cx: &mut VisualTestContext| {
+            for _ in 0..30 {
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        for _ in 0..300 {
+            settle(&mut cx);
+            if view.read_with(&cx, |v, _| v.messages.len() >= 6 && !v.loading_older) {
+                break;
+            }
+        }
+        assert!(view.read_with(&cx, |v, _| v.list.is_following_tail()));
+        cx.update(|window, cx| view.update(cx, |v, cx| v.target_last(window, cx)));
+        settle(&mut cx);
+        // The ones just above are on screen: the list stays put, still
+        // following.
+        for _ in 0..2 {
+            cx.update(|window, cx| view.update(cx, |v, cx| v.move_target(-1, window, cx)));
+            settle(&mut cx);
+        }
+        assert!(view.read_with(&cx, |v, _| v.newest_in_view() && v.list.is_following_tail()), "stayed put");
+        // Far enough up that the targeted message leaves the bottom.
+        for _ in 0..3 {
+            cx.update(|window, cx| view.update(cx, |v, cx| v.move_target(-1, window, cx)));
+            settle(&mut cx);
+        }
+        view.read_with(&cx, |v, _| {
+            let ix = v.targeted_index().unwrap();
+            assert_eq!(ix, v.messages.len() - 6);
+            let row = v.list.bounds_for_item(ix).expect("targeted row laid out");
+            let viewport = v.list.viewport_bounds();
+            // Its top, at least: a photo's row can be taller than the window.
+            assert!(row.top() >= viewport.top() - px(1.) && row.top() < viewport.bottom(), "in view");
         });
         backend.shutdown();
     }
