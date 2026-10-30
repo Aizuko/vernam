@@ -1,6 +1,6 @@
 # Working on Vernam
 
-Vernam was called Signal GPUI (the repository was knpwrs/signal-gpui), then Ziggy (knpwrs/ziggy); the cargo package and the `SIGNAL_GPUI_*` environment variables keep the first name. A new former name goes in `former_name::FORMER`, newest first.
+Vernam was called Signal GPUI (the repository was knpwrs/signal-gpui), then Ziggy (knpwrs/ziggy), and lives at knpwrs/vernam; the cargo package and the `SIGNAL_GPUI_*` environment variables keep the first name. A new former name goes in `former_name::FORMER`, newest first.
 
 Lessons from building this client and from its code reviews. README.md covers what the app does; this covers how to change it without repeating old mistakes.
 
