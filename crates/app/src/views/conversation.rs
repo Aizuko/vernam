@@ -1,6 +1,8 @@
 //! Conversation pane: header, message timeline and composer.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -10,6 +12,7 @@ use gpui_kit::{
     ListAlignment, ListOffset, ListScrollEvent, ListState, SharedString, Subscription, Window, deferred, div, img,
     anchored, list, px,
 };
+use gpui_kit::component::scroll::ScrollbarHandle;
 use signal_backend::Command;
 use signal_store::{
     AttachmentMeta, ConversationId, ConversationKind, DeliveryStatus, Direction, Message, Reaction, ViewOnce,
@@ -54,9 +57,14 @@ pub struct ConversationView {
     /// Incoming messages that arrived while scrolled up (shown on the
     /// jump-to-latest button); they're read once scrolled into view.
     unseen: usize,
-    /// Scrolled by hand or by keyboard: once the list lays out, read the
-    /// chat if the newest messages are on screen.
-    check_caught_up: bool,
+    /// Scrolled by hand or with the scrollbar: once the list lays out,
+    /// `after_scroll`. Shared with `scrollbar`, which sets it.
+    check_caught_up: Rc<Cell<bool>>,
+    /// A message was targeted or a newer page landed: `after_scroll` too,
+    /// without the floating date, as the list may not have moved.
+    check_quietly: bool,
+    /// The timeline scrollbar's handle.
+    scrollbar: TimelineScrollbar,
     /// Messages are only marked read while you can see them.
     window_active: bool,
     /// Decoded photos for this conversation, bounded; freed with the view.
@@ -165,6 +173,45 @@ enum Landing {
     Unread,
 }
 
+/// The timeline's scrollbar handle: the list's, noting each move in
+/// `check_caught_up` (`moved` is that cell). The list doesn't call its scroll
+/// handler for a drag of the scrollbar.
+#[derive(Clone)]
+struct TimelineScrollbar {
+    list: ListState,
+    moved: Rc<Cell<bool>>,
+}
+
+impl ScrollbarHandle for TimelineScrollbar {
+    fn viewport_bounds(&self) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        ScrollbarHandle::viewport_bounds(&self.list)
+    }
+
+    fn offset(&self) -> gpui_kit::Point<gpui_kit::Pixels> {
+        ScrollbarHandle::offset(&self.list)
+    }
+
+    fn set_offset(&self, offset: gpui_kit::Point<gpui_kit::Pixels>) {
+        ScrollbarHandle::set_offset(&self.list, offset);
+        self.moved.set(true);
+    }
+
+    fn content_size(&self) -> gpui_kit::Size<gpui_kit::Pixels> {
+        ScrollbarHandle::content_size(&self.list)
+    }
+
+    fn start_drag(&self) {
+        ScrollbarHandle::start_drag(&self.list);
+    }
+
+    fn end_drag(&self) {
+        ScrollbarHandle::end_drag(&self.list);
+        // The loads held back during the drag; a cancelled touch drag ends
+        // without a last move.
+        self.moved.set(true);
+    }
+}
+
 /// Desktop's "N Unread Messages" (`icu:unreadMessages`).
 fn unread_line(count: u32) -> String {
     format!("{count} Unread Message{}", if count == 1 { "" } else { "s" })
@@ -206,29 +253,22 @@ impl ConversationView {
         let list = ListState::new(0, ListAlignment::Top, px(800.));
         list.set_follow_mode(FollowMode::Tail);
         let weak = cx.entity().downgrade();
-        list.set_scroll_handler(move |event: &ListScrollEvent, _, cx| {
+        // Where a scroll landed is known once the list lays it out
+        // (`after_scroll`): the event's visible_range is where the list was
+        // before the scroll, and a message that came while scrolled up has no
+        // height yet.
+        list.set_scroll_handler(move |_: &ListScrollEvent, _, cx| {
             let weak = weak.clone();
-            let near_top = event.visible_range.start < 8;
-            let near_end = event.visible_range.end + 8 >= event.count;
             cx.defer(move |cx| {
                 let _ = weak.update(cx, |this, cx| {
-                    if near_top {
-                        this.load_older(cx);
-                    }
-                    if near_end {
-                        this.load_newer(cx);
-                    }
-                    // Whether this reached the newest messages is known once
-                    // the list lays it out: the event's visible_range is
-                    // where the list was before the scroll, and a message
-                    // that came while scrolled up has no height yet.
-                    this.check_caught_up = true;
-                    this.note_scrolled(cx);
+                    this.check_caught_up.set(true);
                     cx.notify();
                 });
             });
         });
 
+        let check_caught_up = Rc::<Cell<bool>>::default();
+        let scrollbar = TimelineScrollbar { list: list.clone(), moved: check_caught_up.clone() };
         let timeline_focus = cx.focus_handle();
         let unread_at_open = state.read(cx).conversation(&id).map_or(0, |c| c.unread_count);
         let subscriptions = vec![
@@ -339,7 +379,9 @@ impl ConversationView {
             reaction_viewer: None,
             reaction_viewer_closed_by: ClosedByClick::default(),
             unseen: 0,
-            check_caught_up: false,
+            check_caught_up,
+            check_quietly: false,
+            scrollbar,
             window_active: window.is_window_active(),
             image_cache: LruImageCache::new(cx),
             has_newer: false,
@@ -1035,21 +1077,18 @@ impl ConversationView {
             .is_some_and(|row| row.bottom() <= self.list.viewport_bounds().bottom() + px(1.))
     }
 
-    /// After the list (its prepaint lays out a scroll), reads the chat if a
-    /// scroll by hand or by keyboard brought the newest messages on screen.
+    /// After the list's prepaint (which lays out a scroll), runs
+    /// `after_scroll` if `check_caught_up` asks for it.
     fn render_caught_up_check(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
         gpui_kit::canvas(
             move |_, _, cx| {
-                if weak.upgrade().is_some_and(|this| this.read(cx).check_caught_up) {
+                if weak.upgrade().is_some_and(|this| {
+                    let this = this.read(cx);
+                    this.check_caught_up.get() || this.check_quietly
+                }) {
                     cx.defer(move |cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.check_caught_up = false;
-                            if this.newest_in_view() && !this.has_newer {
-                                this.caught_up(cx);
-                                cx.notify();
-                            }
-                        });
+                        let _ = weak.update(cx, |this, cx| this.after_scroll(cx));
                     });
                 }
             },
@@ -1057,6 +1096,38 @@ impl ConversationView {
         )
         .absolute()
         .size_0()
+    }
+
+    /// Where a scroll, a targeted message or a newer page landed, as laid
+    /// out: loads more near either end of what's loaded, reads the chat if
+    /// the newest messages are on screen, and for a scroll shows the
+    /// floating date.
+    fn after_scroll(&mut self, cx: &mut Context<Self>) {
+        let scrolled = self.check_caught_up.replace(false);
+        let quiet = std::mem::take(&mut self.check_quietly);
+        if !scrolled && !quiet {
+            return;
+        }
+        // The list maps a scrollbar drag against the height it had when the
+        // drag began, so rows added meanwhile would throw the thumb off. They
+        // load once it's let go (its last move asks again).
+        if !self.list.is_scrollbar_dragging() {
+            if self.list.logical_scroll_top().item_ix < 8 {
+                self.load_older(cx);
+            }
+            // Rows far below aren't measured and report None: not near.
+            let count = self.list.item_count();
+            if count > 0 && self.list.item_is_below_viewport(count.saturating_sub(9)) == Some(false) {
+                self.load_newer(cx);
+            }
+        }
+        if self.newest_in_view() && !self.has_newer {
+            self.caught_up(cx);
+        }
+        if scrolled {
+            self.note_scrolled(cx);
+        }
+        cx.notify();
     }
 
     /// The newest messages are on screen (and the window is in front): read
@@ -1325,6 +1396,10 @@ impl ConversationView {
                 }
                 let Ok(newer) = result else { return };
                 this.has_newer = newer.len() as u32 == PAGE;
+                // On screen as it lands, the newest page is read, and if not
+                // yet the newest, the next one loads.
+                this.check_quietly = true;
+                cx.notify();
                 if !this.has_newer {
                     // The newest message is loaded: the typing bubble may show.
                     this.remeasure_typing(cx);
@@ -4841,7 +4916,7 @@ impl Render for ConversationView {
                     )
                     .child(self.render_caught_up_check(cx))
                     .child(
-                        gpui_kit::component::scroll::Scrollbar::vertical(&self.list)
+                        gpui_kit::component::scroll::Scrollbar::vertical(&self.scrollbar)
                             .mode(gpui_kit::component::scroll::ScrollbarMode::Hover),
                     )
                     .children(self.render_floating_date(palette))
@@ -5449,7 +5524,7 @@ impl ConversationView {
         self.targeted = Some(message.id);
         self.list.scroll_to_reveal_item(ix);
         // A scroll in code doesn't call the scroll handler.
-        self.check_caught_up = true;
+        self.check_quietly = true;
         window.focus(&self.timeline_focus, cx);
         cx.notify();
     }
@@ -6535,12 +6610,30 @@ mod tests {
         assert_eq!(unread(&backend), 0);
         assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
 
+        // And dragging the scrollbar to the bottom: the list doesn't call its
+        // scroll handler for that either. Moved through its handle as a drag
+        // does (a headless drag doesn't reach the hover-shown scrollbar).
+        scroll_up_and_arrive(&mut cx, chrono::Utc::now().timestamp_millis() + 6);
+        let scrollbar = view.read_with(&cx, |v, _| v.scrollbar.clone());
+        for _ in 0..50 {
+            scrollbar.start_drag();
+            scrollbar.set_offset(-scrollbar.list.max_offset_for_scrollbar());
+            scrollbar.end_drag();
+            settle(&mut cx);
+            if view.read_with(&cx, |v, _| v.newest_in_view()) {
+                break;
+            }
+        }
+        assert!(view.read_with(&cx, |v, _| v.newest_in_view()), "dragged down");
+        assert_eq!(unread(&backend), 0);
+        assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
+
         // Jumped back, sending loads the newest. The sent message is saved
         // after the page is read, and still shows.
         view.update(&mut cx, |v, _| v.has_newer = true);
         composer.update(&mut cx, |_, cx| cx.emit(ComposerEvent::Sent));
         assert!(view.read_with(&cx, |v, _| v.reloading.is_some()));
-        let sent_at = chrono::Utc::now().timestamp_millis() + 6;
+        let sent_at = chrono::Utc::now().timestamp_millis() + 7;
         let db = backend.db().clone();
         let sent = signal_store::NewMessage {
             conversation_id: ConversationId(MAYA.into()),
