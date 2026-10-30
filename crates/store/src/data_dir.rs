@@ -1,13 +1,14 @@
 //! Stored file paths are absolute: attachments, thumbnails, previews,
 //! stories, avatars, badges and sticker covers name files in the data
-//! directory. When the directory moves (Signal GPUI's became Ziggy's),
-//! they're rewritten to name the new one.
+//! directory. When the directory moves (Signal GPUI's became Ziggy's, then
+//! Vernam's), they're rewritten to name the new one.
 
 use sqlx::Row as _;
 
 use crate::{AppDb, Result};
 
-/// The data directory whose paths were last rewritten.
+/// Followed by `:` and a former data directory: set once its paths were
+/// rewritten. (Alone, from before: the one directory whose paths were.)
 pub const SETTING_REBASED_FROM: &str = "data_dir.rebased_from";
 
 /// Columns holding what people wrote (message text and its previews,

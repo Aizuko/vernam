@@ -10,13 +10,11 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use rand::RngCore as _;
 
-#[cfg(target_os = "macos")]
-const SERVICE: &str = "ziggy";
-/// Where the key was kept while the app was called Signal GPUI. Read when
-/// [`SERVICE`] has none, and copied there; left in place, so the old app
-/// can still read it.
-#[cfg(target_os = "macos")]
-const FORMER_SERVICE: &str = "signal-gpui";
+#[cfg(any(target_os = "macos", test))]
+use crate::former_name::FORMER;
+use crate::former_name::Former;
+
+const SERVICE: &str = "vernam";
 #[cfg(target_os = "macos")]
 const ACCOUNT: &str = "database-key";
 
@@ -30,24 +28,54 @@ pub enum KeyStore {
     File,
 }
 
+/// A database key, and the former name's Keychain item it came from, if
+/// it did: copied to [`SERVICE`] only once it has opened the data
+/// ([`keep`]), so a wrong guess can't replace a right one there.
+pub struct Loaded {
+    pub key: [u8; 32],
+    copy_from: Option<&'static str>,
+}
+
 /// Loads the database key, creating and storing a new one on first run.
-/// `moved_in`: Signal GPUI's data just moved to `data_dir`, so its key is
-/// the one that opens it.
-pub fn load_or_create(data_dir: &Path, store_kind: KeyStore, moved_in: bool) -> Result<[u8; 32]> {
+/// `moved_from`: the former name whose data just moved to `data_dir`, so
+/// its key is the one that opens it.
+pub fn load_or_create(data_dir: &Path, store_kind: KeyStore, moved_from: Option<&'static Former>) -> Result<Loaded> {
     let existing = match store_kind {
-        KeyStore::System => load(data_dir, moved_in)?,
-        KeyStore::File => load_file(data_dir)?,
+        KeyStore::System => load(data_dir, moved_from)?,
+        KeyStore::File => load_file(data_dir)?.map(|key| Loaded { key, copy_from: None }),
     };
-    if let Some(key) = existing {
-        return Ok(key);
+    if let Some(loaded) = existing {
+        return Ok(loaded);
+    }
+    // A new key can't open databases made with another: refuse rather than
+    // store one, which would also hide a former key restored later.
+    if let Some(db) = ["signal.db", "app.db"].iter().map(|name| data_dir.join(name)).find(|path| path.exists()) {
+        anyhow::bail!(
+            "found no database key for {}, which can't be opened without it. Only if that key is gone for \
+             good: deleting {} starts over, unlinking this device and losing what's stored there",
+            db.display(),
+            data_dir.display()
+        );
     }
     let mut key = [0u8; 32];
     rand::rng().fill_bytes(&mut key);
+    // Kept before any database exists: one made without its key kept
+    // couldn't be opened again.
     match store_kind {
         KeyStore::System => store(data_dir, &key)?,
         KeyStore::File => store_file(data_dir, &key)?,
     }
-    Ok(key)
+    Ok(Loaded { key, copy_from: None })
+}
+
+/// The key opened the data: one from a former name's item is copied to
+/// [`SERVICE`], and left in that item too, so that app can still read it.
+pub fn keep(data_dir: &Path, loaded: &Loaded) -> Result<()> {
+    if let Some(service) = loaded.copy_from {
+        store(data_dir, &loaded.key)?;
+        tracing::info!("copied the database key from the Keychain item {service:?} to {SERVICE:?}");
+    }
+    Ok(())
 }
 
 fn decode(hex_key: &[u8]) -> Result<[u8; 32]> {
@@ -57,21 +85,34 @@ fn decode(hex_key: &[u8]) -> Result<[u8; 32]> {
         .map_err(|_| anyhow::anyhow!("stored database key has the wrong length"))
 }
 
+/// The key: for data that just moved in, its former name's, then the other
+/// former names', newest first, and Vernam's last (a `vernam` key from
+/// before is for a profile of Vernam's own that's gone: the data moved in
+/// only because Vernam's directory didn't exist). Otherwise Vernam's, then
+/// the former names', newest first, so there's never a new key for
+/// databases an old name's key encrypts.
 #[cfg(target_os = "macos")]
-fn load(data_dir: &Path, moved_in: bool) -> Result<Option<[u8; 32]>> {
-    // A `ziggy` key from before is for a profile of Ziggy's own that's gone
-    // (the data moved in only because Ziggy's directory didn't exist), and
-    // can't open Signal GPUI's databases.
-    if !moved_in && let Some(key) = load_service(SERVICE)? {
-        return Ok(Some(key));
-    }
-    // Never a new key for databases the old name's key encrypts.
-    let Some(key) = load_service(FORMER_SERVICE)? else {
-        return if moved_in { load_service(SERVICE) } else { Ok(None) };
+fn load(_data_dir: &Path, moved_from: Option<&'static Former>) -> Result<Option<Loaded>> {
+    Ok(find(moved_from, load_service)?.map(|(service, key)| Loaded { key, copy_from: (service != SERVICE).then_some(service) }))
+}
+
+/// The first key there is, in [`load`]'s order, and the item it's in.
+#[cfg(any(target_os = "macos", test))]
+fn find(
+    moved_from: Option<&'static Former>,
+    mut lookup: impl FnMut(&'static str) -> Result<Option<[u8; 32]>>,
+) -> Result<Option<(&'static str, [u8; 32])>> {
+    let others = FORMER.iter().filter(|former| Some(*former) != moved_from).map(|former| former.keychain_service);
+    let services: Vec<&'static str> = match moved_from {
+        Some(former) => [former.keychain_service].into_iter().chain(others).chain([SERVICE]).collect(),
+        None => [SERVICE].into_iter().chain(others).collect(),
     };
-    store(data_dir, &key)?;
-    tracing::info!("copied the database key from the Keychain item {FORMER_SERVICE:?} to {SERVICE:?}");
-    Ok(Some(key))
+    for service in services {
+        if let Some(key) = lookup(service)? {
+            return Ok(Some((service, key)));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(target_os = "macos")]
@@ -92,8 +133,8 @@ fn store(_data_dir: &Path, key: &[u8; 32]) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load(data_dir: &Path, _moved_in: bool) -> Result<Option<[u8; 32]>> {
-    load_file(data_dir)
+fn load(data_dir: &Path, _moved_from: Option<&'static Former>) -> Result<Option<Loaded>> {
+    Ok(load_file(data_dir)?.map(|key| Loaded { key, copy_from: None }))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -118,4 +159,67 @@ fn store_file(data_dir: &Path, key: &[u8; 32]) -> Result<()> {
     let mut file = options.open(data_dir.join("db.key")).context("creating database key file")?;
     file.write_all(hex::encode(key).as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Looks keys up in `items` (service, key byte), noting each lookup.
+    fn keychain<'a>(
+        items: &'a [(&str, u8)],
+        asked: &'a mut Vec<&'static str>,
+    ) -> impl FnMut(&'static str) -> Result<Option<[u8; 32]>> + 'a {
+        move |service| {
+            asked.push(service);
+            Ok(items.iter().find(|(s, _)| *s == service).map(|(_, byte)| [*byte; 32]))
+        }
+    }
+
+    #[test]
+    fn data_that_moved_in_takes_its_apps_key() {
+        let ziggy = &FORMER[0];
+        // A `vernam` item from a profile of Vernam's own that's gone loses.
+        let items = [("vernam", 1), ("ziggy", 2), ("signal-gpui", 3)];
+        let mut asked = Vec::new();
+        assert_eq!(find(Some(ziggy), keychain(&items, &mut asked)).unwrap(), Some(("ziggy", [2; 32])));
+        // With no `ziggy` item (a denied prompt when Ziggy moved Signal
+        // GPUI's data), older names come before a stale `vernam` one.
+        let items = [("vernam", 1), ("signal-gpui", 3)];
+        let mut asked = Vec::new();
+        assert_eq!(find(Some(ziggy), keychain(&items, &mut asked)).unwrap(), Some(("signal-gpui", [3; 32])));
+        assert_eq!(asked, ["ziggy", "signal-gpui"]);
+        // Vernam's last, each asked once.
+        let mut asked = Vec::new();
+        assert_eq!(find(Some(ziggy), keychain(&[("vernam", 1)], &mut asked)).unwrap(), Some(("vernam", [1; 32])));
+        assert_eq!(asked, ["ziggy", "signal-gpui", "vernam"]);
+    }
+
+    #[test]
+    fn no_new_key_for_databases_that_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("signal.db"), "encrypted").unwrap();
+        let error = load_or_create(dir.path(), KeyStore::File, None).err().unwrap().to_string();
+        assert!(error.contains("found no database key"), "{error}");
+        assert!(!dir.path().join("db.key").exists());
+        // A new profile gets one, and keeps it.
+        let fresh = tempfile::tempdir().unwrap();
+        let key = load_or_create(fresh.path(), KeyStore::File, None).unwrap().key;
+        std::fs::write(fresh.path().join("signal.db"), "encrypted").unwrap();
+        assert_eq!(load_or_create(fresh.path(), KeyStore::File, None).unwrap().key, key);
+    }
+
+    #[test]
+    fn otherwise_vernams_key_then_the_newest_former_names() {
+        let items = [("vernam", 1), ("ziggy", 2)];
+        assert_eq!(find(None, keychain(&items, &mut Vec::new())).unwrap(), Some(("vernam", [1; 32])));
+        let items = [("signal-gpui", 3), ("ziggy", 2)];
+        assert_eq!(find(None, keychain(&items, &mut Vec::new())).unwrap(), Some(("ziggy", [2; 32])));
+        // None at all: only then is a new key made.
+        assert_eq!(find(None, keychain(&[], &mut Vec::new())).unwrap(), None);
+        // A Keychain error stops the search rather than skipping to a key
+        // that may not be this data's.
+        let failing = |service: &'static str| if service == "vernam" { Err(anyhow::anyhow!("denied")) } else { Ok(Some([9; 32])) };
+        assert!(find(None, failing).is_err());
+    }
 }

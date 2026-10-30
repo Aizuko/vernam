@@ -1,6 +1,6 @@
-# Working on Ziggy
+# Working on Vernam
 
-Ziggy was called Signal GPUI (the repository was knpwrs/signal-gpui); the cargo package and the `SIGNAL_GPUI_*` environment variables keep the old name.
+Vernam was called Signal GPUI (the repository was knpwrs/signal-gpui), then Ziggy (knpwrs/ziggy); the cargo package and the `SIGNAL_GPUI_*` environment variables keep the first name. A new former name goes in `former_name::FORMER`, newest first.
 
 Lessons from building this client and from its code reviews. README.md covers what the app does; this covers how to change it without repeating old mistakes.
 
@@ -27,7 +27,7 @@ presage stores the first profile, profile photo and group photo it downloads and
 ## Privacy and the user's account
 
 - Never use the user's messages, contacts, screenshots or photos as test data or demo content. The demo's people are made up and its images are drawn in code.
-- The user's real account runs from `target/release/Ziggy.app` (`target/release/Signal GPUI.app` until the user rebuilds after the rename). Don't kill it, don't build release over it, and don't touch its data directory (`~/Library/Application Support/io.github.knpwrs.Ziggy`, before that `org.signal-gpui.Signal-GPUI`) except to read logs or databases when asked. Opening a database needs the Keychain key, which prompts the user. Any `ziggy` run without `SIGNAL_GPUI_DATA_DIR`, debug included, is also the real account, and the first one moves Signal GPUI's data directory to Ziggy's (`former_name.rs`).
+- The user's real account runs from `target/release/Vernam.app` (`Ziggy.app` until the user rebuilds after the rename). Don't kill it, don't build release over it, and don't touch its data directory (`~/Library/Application Support/io.github.knpwrs.Vernam`, before that `io.github.knpwrs.Ziggy` and `org.signal-gpui.Signal-GPUI`) except to read logs or databases when asked. Opening a database needs the Keychain key, which prompts the user. Any `vernam` run without `SIGNAL_GPUI_DATA_DIR`, debug included, is also the real account, and the first one moves the newest former name's data directory to Vernam's (`former_name.rs`).
 - Screenshot only windows of a process you started (match by PID). Never send synthetic input. A window on another Space doesn't draw; wait for it rather than activating it.
 - Don't ship Signal's Giphy key.
 

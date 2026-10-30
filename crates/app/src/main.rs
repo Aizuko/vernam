@@ -1,4 +1,4 @@
-//! Ziggy: a native client for Signal, unofficial, after Signal Desktop.
+//! Vernam: a native client for Signal, unofficial, after Signal Desktop.
 
 mod assets;
 mod avatar_presets;
@@ -47,12 +47,12 @@ gpui_kit::actions!(signal, [Quit, About, OpenSettings, ShowDebugLog, FocusSearch
 
 /// `$SIGNAL_GPUI_DATA_DIR` (a development profile, keyed by a file), or the
 /// platform's application data directory (keyed by the Keychain), where
-/// Signal GPUI's data moves on first launch.
+/// the data of a former name (Ziggy, Signal GPUI) moves on first launch.
 fn data_dir() -> Result<(PathBuf, keys::KeyStore, former_name::Moved)> {
     if let Some(dir) = std::env::var_os("SIGNAL_GPUI_DATA_DIR") {
         return Ok((PathBuf::from(dir), keys::KeyStore::File, former_name::Moved::Nothing));
     }
-    let dir = directories::ProjectDirs::from("io.github", "knpwrs", "Ziggy")
+    let dir = directories::ProjectDirs::from("io.github", "knpwrs", "Vernam")
         .map(|dirs| dirs.data_dir().to_path_buf())
         .context("no home directory")?;
     let moved = former_name::move_data(&dir)?;
@@ -67,8 +67,11 @@ fn device_name() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
-    host.unwrap_or_else(|| "Ziggy".into())
+    host.unwrap_or_else(|| "Vernam".into())
 }
+
+/// How many days of logs are kept.
+const LOG_DAYS: usize = 3;
 
 /// Logs to stderr and to daily files in `logs/` (three days kept), which
 /// Help → Debug Log collects. Returns the guard that flushes the file writer.
@@ -83,10 +86,11 @@ fn init_logging(data_dir: &std::path::Path) -> Option<tracing_appender::non_bloc
     };
     let files = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("ziggy")
+        .filename_prefix("vernam")
         .filename_suffix("log")
-        .max_log_files(3)
+        .max_log_files(LOG_DAYS)
         .build(signal_backend::debug_log::log_dir(data_dir));
+    former_name::prune_former_logs(&signal_backend::debug_log::log_dir(data_dir), LOG_DAYS);
     let (file_layer, guard) = match files {
         Ok(files) => {
             let (writer, guard) = tracing_appender::non_blocking(files);
@@ -115,22 +119,30 @@ fn init_logging(data_dir: &std::path::Path) -> Option<tracing_appender::non_bloc
 fn start_backend(
     data_dir: PathBuf,
     key_store: keys::KeyStore,
-    moved_in: bool,
+    moved_from: Option<&'static former_name::Former>,
 ) -> Result<(Backend, futures::channel::mpsc::UnboundedReceiver<signal_backend::Event>)> {
-    let db_key = keys::load_or_create(&data_dir, key_store, moved_in)?;
+    let loaded = keys::load_or_create(&data_dir, key_store, moved_from)?;
     tracing::info!("data directory: {}", data_dir.display());
-    Backend::start(Config {
-        data_dir,
-        db_key,
+    let started = Backend::start(Config {
+        data_dir: data_dir.clone(),
+        db_key: loaded.key,
         device_name: device_name(),
         demo: std::env::var_os("SIGNAL_GPUI_DEMO").is_some(),
-        // The paths Signal GPUI stored name its directory, even once the
-        // data has moved.
-        former_data_dir: match key_store {
-            keys::KeyStore::System => former_name::former_data_dir(),
-            keys::KeyStore::File => None,
+        // The paths stored under a former name name its directory, even
+        // once the data has moved.
+        former_data_dirs: match key_store {
+            keys::KeyStore::System => former_name::former_data_dirs(),
+            keys::KeyStore::File => Vec::new(),
         },
-    })
+    })?;
+    // The key opened the data: kept as Vernam's, after which where moved-in
+    // data came from is done with. If keeping it fails, the next launch
+    // tries again in the same order.
+    match keys::keep(&data_dir, &loaded) {
+        Ok(()) => former_name::key_settled(&data_dir),
+        Err(error) => tracing::warn!(%error, "couldn't keep the database key"),
+    }
+    Ok(started)
 }
 
 fn bind_keys(cx: &mut App) {
@@ -161,21 +173,28 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
     let _log_guard = init_logging(&data_dir);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
-    let moved_in = matches!(moved, former_name::Moved::From(_));
+    // From an earlier launch that moved the data but didn't get its key.
+    let mut moved_from = match key_store {
+        keys::KeyStore::System => former_name::moved_from(&data_dir),
+        keys::KeyStore::File => None,
+    };
     match moved {
-        former_name::Moved::From(former) => tracing::info!("moved Signal GPUI's data here from {}", former.display()),
-        former_name::Moved::LeftIn(former) => {
-            tracing::warn!("Signal GPUI's data is still in {}: this directory existed already", former.display())
+        former_name::Moved::From(former, dir) => {
+            tracing::info!("moved {}'s data here from {}", former.name, dir.display());
+            moved_from = Some(former);
+        }
+        former_name::Moved::LeftIn(former, dir) => {
+            tracing::warn!("{}'s data is still in {}: this directory existed already", former.name, dir.display())
         }
         // (`StillRunning` doesn't get here: `move_data` stops the launch.)
-        former_name::Moved::Nothing | former_name::Moved::StillRunning => {}
+        former_name::Moved::Nothing | former_name::Moved::StillRunning(_) => {}
     }
 
     // Parse the emoji index off the main thread while the window opens.
     std::thread::spawn(signal_emoji::warm_up);
 
     let window_dir = data_dir.clone();
-    let (backend, mut events) = start_backend(data_dir, key_store, moved_in)?;
+    let (backend, mut events) = start_backend(data_dir, key_store, moved_from)?;
 
     // Links macOS opens us with (`sgnl://`, registered in the bundle's
     // Info.plist by scripts/bundle.sh), handed to the app once it runs.

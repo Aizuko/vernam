@@ -108,8 +108,14 @@ pub fn assemble(log_dir: &Path, header: &Header, sensitive_paths: &[PathBuf]) ->
     let mut files: Vec<PathBuf> = std::fs::read_dir(log_dir)
         .map(|entries| entries.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect())
         .unwrap_or_default();
-    // Daily files are named by date, so name order is time order.
-    files.sort();
+    // Daily files are named `<prefix>.<date>.log`: by date, then (one day's
+    // files under the app's former and current names) by when written.
+    files.sort_by_cached_key(|file| {
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let date = name.split('.').nth(1).unwrap_or_default().to_owned();
+        let written = std::fs::metadata(file).and_then(|m| m.modified()).ok();
+        (date, written, name)
+    });
     for file in files {
         match std::fs::read(&file) {
             Ok(bytes) => out.push_str(&redact(&String::from_utf8_lossy(&bytes), sensitive_paths)),
@@ -123,7 +129,7 @@ pub fn assemble(log_dir: &Path, header: &Header, sensitive_paths: &[PathBuf]) ->
 pub async fn upload(log: &str, app_version: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .use_preconfigured_tls(crate::link_preview::tls_config()?)
-        .user_agent(format!("ziggy/{app_version}"))
+        .user_agent(format!("vernam/{app_version}"))
         .timeout(UPLOAD_TIMEOUT)
         .build()?;
 
@@ -157,7 +163,7 @@ pub async fn upload(log: &str, app_version: &str) -> anyhow::Result<String> {
     multipart = multipart.text("Content-Type", "application/gzip").part(
         "file",
         reqwest::multipart::Part::bytes(body)
-            .file_name(format!("ziggy-debug-log-{app_version}.txt.gz"))
+            .file_name(format!("vernam-debug-log-{app_version}.txt.gz"))
             .mime_str("application/gzip")?,
     );
     let response = client.post(target).multipart(multipart).send().await?;
@@ -173,9 +179,9 @@ mod tests {
 
     #[test]
     fn redacts_like_desktop() {
-        let paths = [PathBuf::from("/Users/me/Library/Application Support/io.github.knpwrs.Ziggy")];
+        let paths = [PathBuf::from("/Users/me/Library/Application Support/io.github.knpwrs.Vernam")];
         let line = "send to +15551234567 aci 6b1a2b3c-0000-4000-8000-000000000abc in groupv2(abcdefXYZ==) \
-                    file /Users/me/Library/Application Support/io.github.knpwrs.Ziggy/attachments/1.png \
+                    file /Users/me/Library/Application Support/io.github.knpwrs.Vernam/attachments/1.png \
                     card 4111-1111-1111-1111 at 0x00007ff8a1b2c3d4 \
                     conversation g:0000000000000000000000000000000000000000000000000000000000000123";
         let redacted = redact(line, &paths);
@@ -191,8 +197,10 @@ mod tests {
     #[test]
     fn assembles_header_then_logs_in_order() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("ziggy.2026-10-13.log"), "older +15551234567\n").unwrap();
-        std::fs::write(dir.path().join("ziggy.2026-10-14.log"), "newer\n").unwrap();
+        std::fs::write(dir.path().join("vernam.2026-10-13.log"), "older +15551234567\n").unwrap();
+        std::fs::write(dir.path().join("vernam.2026-10-14.log"), "newer\n").unwrap();
+        // Under the app's former name, which sorts after "vernam" by name.
+        std::fs::write(dir.path().join("ziggy.2026-10-12.log"), "oldest\n").unwrap();
         let header = Header {
             app_version: "0.1.0".into(),
             os_version: "macOS 26".into(),
@@ -203,6 +211,7 @@ mod tests {
         assert!(log.starts_with("========= System info ========="), "{log}");
         assert!(log.contains("Phone: +[REDACTED]321"));
         let logs = &log[log.find("========= Logs =========").unwrap()..];
+        assert!(logs.find("oldest").unwrap() < logs.find("older +[REDACTED]567").unwrap());
         assert!(logs.find("older +[REDACTED]567").unwrap() < logs.find("newer").unwrap());
     }
 }

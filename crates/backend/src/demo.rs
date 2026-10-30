@@ -633,7 +633,7 @@ fn demo_all_stickers(data_dir: &Path) -> Vec<crate::StickerPackView> {
                 Some(crate::StickerView { id: ix as u32, emoji: Some((*emoji).into()), path })
             })
             .collect();
-        Some(crate::StickerPackView { id, key: vec![0; 32], title: title.into(), author: "Ziggy".into(), stickers })
+        Some(crate::StickerPackView { id, key: vec![0; 32], title: title.into(), author: "Vernam".into(), stickers })
     };
     [
         pack("demo", vec![0xde, 0x70], "Demo shapes", &["😀", "😎", "🎉", "❤️", "👍", "🔥", "🌄", "☕"], 0.),

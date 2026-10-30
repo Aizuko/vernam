@@ -96,7 +96,7 @@ fn open_window(bounds: WindowBounds, cx: &mut App) -> anyhow::Result<()> {
             // span about 59), like Desktop's.
             traffic_light_position: Some(point(px(10.5), px(18.))),
         }),
-        app_id: Some("io.github.knpwrs.ziggy".into()),
+        app_id: Some("io.github.knpwrs.vernam".into()),
         focus: !background,
         ..Default::default()
     };
@@ -374,7 +374,7 @@ pub(crate) mod tests {
         cx.update(gpui_kit::init);
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let config = signal_backend::Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dir: None };
+        let config = signal_backend::Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new() };
         let (backend, mut events) = signal_backend::Backend::start(config).unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
         cx.update(|cx| {

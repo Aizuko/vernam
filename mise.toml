@@ -4,5 +4,5 @@
 protoc = "36.2"
 
 [tasks.bundle]
-description = "Build release and wrap it in target/release/Ziggy.app"
+description = "Build release and wrap it in target/release/Vernam.app"
 run = ["cargo build --release", "scripts/bundle.sh"]

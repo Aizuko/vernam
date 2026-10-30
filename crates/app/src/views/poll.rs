@@ -771,7 +771,7 @@ mod tests {
             db_key: [7; 32],
             device_name: "test".into(),
             demo: true,
-            former_data_dir: None,
+            former_data_dirs: Vec::new(),
         })
         .unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));

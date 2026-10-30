@@ -551,7 +551,7 @@ impl Render for RootView {
                         .gap_2()
                         .bg(palette.background)
                         .text_color(palette.text_secondary)
-                        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(palette.text).child("Welcome to Ziggy"))
+                        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(palette.text).child("Welcome to Vernam"))
                         .child("Select a chat to start messaging")
                         .child(
                             div()
@@ -638,7 +638,7 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dir: None };
+        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new() };
         let (backend, mut events) = Backend::start(config).unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
         // As the app does: backend events into the model.
@@ -702,7 +702,7 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dir: None };
+        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new() };
         let (backend, mut events) = Backend::start(config).unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
         cx.update(|cx| {
@@ -766,7 +766,7 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dir: None };
+        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new() };
         let (backend, mut events) = Backend::start(config).unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
         cx.update(|cx| {

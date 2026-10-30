@@ -275,10 +275,11 @@ pub struct Config {
     pub device_name: String,
     /// Demo mode: sample data, never connects to Signal (see `demo.rs`).
     pub demo: bool,
-    /// Where this profile's data was before it moved (Signal GPUI's data
-    /// directory, before Ziggy's): the paths stored for its files are
-    /// rewritten once to name `data_dir` instead.
-    pub former_data_dir: Option<PathBuf>,
+    /// Where this profile's data may have been before it moved (the data
+    /// directories of the app's former names, Ziggy and Signal GPUI): the
+    /// paths stored for files in each are rewritten once to name
+    /// `data_dir` instead.
+    pub former_data_dirs: Vec<PathBuf>,
 }
 
 /// A group a link leads to, as Desktop's `GroupV2JoinDialog` shows it.
@@ -1347,7 +1348,7 @@ impl Backend {
         if let Err(error) = runtime.block_on(db.upgrade_previews()) {
             tracing::warn!(%error, "failed to refresh conversation previews");
         }
-        if let Some(former) = &config.former_data_dir {
+        for former in &config.former_data_dirs {
             runtime.block_on(rebase_paths(&db, former, &config.data_dir));
         }
 
@@ -1430,14 +1431,18 @@ impl Backend {
 /// former directory. A failure is tried again at the next start.
 async fn rebase_paths(db: &AppDb, former: &std::path::Path, data_dir: &std::path::Path) {
     let (from, to) = (former.to_string_lossy(), data_dir.to_string_lossy());
-    if from == to || db.setting(signal_store::SETTING_REBASED_FROM).await.ok().flatten().as_deref() == Some(&*from) {
+    let done = format!("{}:{from}", signal_store::SETTING_REBASED_FROM);
+    // (The single setting before there were two former names held the one
+    // directory done.)
+    let earlier = db.setting(signal_store::SETTING_REBASED_FROM).await.ok().flatten();
+    if from == to || earlier.as_deref() == Some(&*from) || db.setting(&done).await.ok().flatten().is_some() {
         return;
     }
     let started = std::time::Instant::now();
     match db.rebase_paths(&from, &to).await {
         Ok(changed) => {
             tracing::info!(changed, elapsed = ?started.elapsed(), "rewrote stored file paths from {from}");
-            if let Err(error) = db.set_setting(signal_store::SETTING_REBASED_FROM, &from).await {
+            if let Err(error) = db.set_setting(&done, "1").await {
                 tracing::warn!(%error, "couldn't record the rewritten file paths");
             }
         }

@@ -1501,7 +1501,7 @@ async fn renaming_an_author_looks_up_their_messages_by_index() {
 #[tokio::test]
 async fn stored_paths_follow_a_moved_data_directory() {
     let db = test_db().await;
-    let (old, new) = ("/Users/me/Library/Application Support/old", "/Users/me/Library/Application Support/io.github.knpwrs.Ziggy");
+    let (old, new) = ("/Users/me/Library/Application Support/old", "/Users/me/Library/Application Support/io.github.knpwrs.Vernam");
     let id = db.insert_message(&incoming("d:a", "a", 1, "see the photo")).await.unwrap();
     let other = db.insert_message(&incoming("d:a", "a", 2, "not a path: /Users/me/Library/Application Support/older/x")).await.unwrap();
     let written = format!("my avatar was {old}/avatars/me.jpg");
