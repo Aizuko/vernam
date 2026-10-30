@@ -57,12 +57,19 @@ pub struct ConversationView {
     /// Incoming messages that arrived while scrolled up (shown on the
     /// jump-to-latest button); they're read once scrolled into view.
     unseen: usize,
-    /// Scrolled by hand or with the scrollbar: once the list lays out,
-    /// `after_scroll`. Shared with `scrollbar`, which sets it.
+    /// Scrolled by hand or with the scrollbar: `after_scroll` shows the
+    /// floating date, and runs even if the list didn't move (a drag's
+    /// release). Shared with `scrollbar`, which sets it.
     check_caught_up: Rc<Cell<bool>>,
-    /// A message was targeted or a newer page landed: `after_scroll` too,
-    /// without the floating date, as the list may not have moved.
-    check_quietly: bool,
+    /// Where `after_scroll` last saw the list (`layout_key`). It runs again
+    /// when that changes, or after a reset.
+    seen_layout: Option<LayoutKey>,
+    /// Whether the newest message showed at that layout.
+    newest_shown: bool,
+    /// Messages changed while a page loaded, and the page wasn't laid out
+    /// when they were replayed: the next `caught_up` reads, though the
+    /// count it goes by may not include them yet.
+    read_once_shown: bool,
     /// The timeline scrollbar's handle.
     scrollbar: TimelineScrollbar,
     /// Messages are only marked read while you can see them.
@@ -172,6 +179,9 @@ enum Landing {
     /// With the unread line at the top.
     Unread,
 }
+
+/// `ConversationView::layout_key`.
+type LayoutKey = (usize, gpui_kit::Pixels, usize, gpui_kit::Size<gpui_kit::Pixels>, Option<gpui_kit::Pixels>, bool);
 
 /// The timeline's scrollbar handle: the list's, noting each move in
 /// `check_caught_up` (`moved` is that cell). The list doesn't call its scroll
@@ -380,7 +390,9 @@ impl ConversationView {
             reaction_viewer_closed_by: ClosedByClick::default(),
             unseen: 0,
             check_caught_up,
-            check_quietly: false,
+            seen_layout: None,
+            newest_shown: false,
+            read_once_shown: false,
             scrollbar,
             window_active: window.is_window_active(),
             image_cache: LruImageCache::new(cx),
@@ -1060,10 +1072,12 @@ impl ConversationView {
         }
     }
 
-    /// Showing the newest messages.
     /// Showing the newest messages (not just the end of what's loaded).
+    /// Not `is_scrolled_to_end`, which can't tell while any row isn't
+    /// measured (a message that just came), and so said yes while scrolled
+    /// up.
     fn at_end(&self) -> bool {
-        !self.has_newer && (self.list.is_following_tail() || self.list.is_scrolled_to_end().unwrap_or(true))
+        !self.has_newer && (self.list.is_following_tail() || self.messages.is_empty() || self.newest_in_view())
     }
 
     /// The bottom of the last loaded message is on screen, as of the list's
@@ -1077,15 +1091,26 @@ impl ConversationView {
             .is_some_and(|row| row.bottom() <= self.list.viewport_bounds().bottom() + px(1.))
     }
 
+    /// Where the list is, as of its last layout: its scroll top, rows,
+    /// size, where the newest message's row ends (rows above it grow and
+    /// shrink), and whether newer messages wait to load.
+    fn layout_key(&self) -> LayoutKey {
+        let top = self.list.logical_scroll_top();
+        let newest_bottom = self.messages.len().checked_sub(1).and_then(|last| self.list.bounds_for_item(last)).map(|b| b.bottom());
+        (top.item_ix, top.offset_in_item, self.list.item_count(), self.list.viewport_bounds().size, newest_bottom, self.has_newer)
+    }
+
     /// After the list's prepaint (which lays out a scroll), runs
-    /// `after_scroll` if `check_caught_up` asks for it.
+    /// `after_scroll` if the list's layout changed (however that came
+    /// about: a scroll, a jump, a page landing, a message, the window), or
+    /// `check_caught_up` asks for it.
     fn render_caught_up_check(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
         gpui_kit::canvas(
             move |_, _, cx| {
                 if weak.upgrade().is_some_and(|this| {
                     let this = this.read(cx);
-                    this.check_caught_up.get() || this.check_quietly
+                    this.check_caught_up.get() || this.seen_layout != Some(this.layout_key())
                 }) {
                     cx.defer(move |cx| {
                         let _ = weak.update(cx, |this, cx| this.after_scroll(cx));
@@ -1098,16 +1123,17 @@ impl ConversationView {
         .size_0()
     }
 
-    /// Where a scroll, a targeted message or a newer page landed, as laid
-    /// out: loads more near either end of what's loaded, reads the chat if
-    /// the newest messages are on screen, and for a scroll shows the
-    /// floating date.
+    /// Where the list landed, as laid out: loads more near either end of
+    /// what's loaded, reads the chat if the newest messages are on screen,
+    /// and for a scroll shows the floating date.
     fn after_scroll(&mut self, cx: &mut Context<Self>) {
         let scrolled = self.check_caught_up.replace(false);
-        let quiet = std::mem::take(&mut self.check_quietly);
-        if !scrolled && !quiet {
+        let key = self.layout_key();
+        if !scrolled && self.seen_layout == Some(key) {
             return;
         }
+        self.seen_layout = Some(key);
+        self.newest_shown = self.newest_in_view();
         // The list maps a scrollbar drag against the height it had when the
         // drag began, so rows added meanwhile would throw the thumb off. They
         // load once it's let go (its last move asks again).
@@ -1137,7 +1163,8 @@ impl ConversationView {
             return;
         }
         let unread = self.state.read(cx).conversation(&self.id).is_some_and(|c| c.unread_count > 0 || c.unread_poll_votes);
-        if unread || self.unseen > 0 {
+        let replayed = std::mem::take(&mut self.read_once_shown);
+        if unread || self.unseen > 0 || replayed {
             // Not gated on the cached count: a message that just arrived may
             // not be counted in the list we hold yet.
             self.state.read(cx).send(Command::MarkRead { conversation: self.id.clone() });
@@ -1148,8 +1175,7 @@ impl ConversationView {
     }
 
     /// Down to the newest message, reloading them if we jumped back, and
-    /// read them. A scroll in code doesn't call the scroll handler, which is
-    /// what reads the chat when it reaches the bottom.
+    /// read them now rather than once the list lays out (`after_scroll`).
     fn scroll_to_newest(&mut self, cx: &mut Context<Self>) {
         if self.has_newer {
             self.load_initial(cx);
@@ -1199,6 +1225,7 @@ impl ConversationView {
                         this.messages = messages;
                         this.start_seen();
                         this.list.reset(this.messages.len() + 1);
+                        this.seen_layout = None;
                         this.relayout(cx);
                         this.list.set_follow_mode(FollowMode::Tail);
                         this.list.scroll_to_end();
@@ -1225,6 +1252,10 @@ impl ConversationView {
             // only updates its row: read it if it's in view.
             if !changed.is_empty() && self.window_active && self.at_end() {
                 self.state.read(cx).send(Command::MarkRead { conversation: self.id.clone() });
+            } else if !changed.is_empty() && self.seen_layout.is_none() {
+                // The new page isn't laid out, so where its end is isn't
+                // known yet: read once it shows (`caught_up`).
+                self.read_once_shown = true;
             }
             for id in changed {
                 self.on_message_changed(id, cx);
@@ -1342,6 +1373,7 @@ impl ConversationView {
         self.start_seen();
         // The message jumped to is never folded away.
         self.list.reset(self.messages.len() + 1);
+        self.seen_layout = None;
         self.relayout(cx);
         if let Slot::Head { set, .. } | Slot::Folded { set } = self.slot(message_id) {
             self.expanded.insert(set);
@@ -1396,10 +1428,6 @@ impl ConversationView {
                 }
                 let Ok(newer) = result else { return };
                 this.has_newer = newer.len() as u32 == PAGE;
-                // On screen as it lands, the newest page is read, and if not
-                // yet the newest, the next one loads.
-                this.check_quietly = true;
-                cx.notify();
                 if !this.has_newer {
                     // The newest message is loaded: the typing bubble may show.
                     this.remeasure_typing(cx);
@@ -1499,6 +1527,13 @@ impl ConversationView {
                     this.fresh.insert(message.id);
                     this.messages.insert(ix, message);
                     this.list.splice(ix..ix, 1);
+                    // At the bottom after a jump (which stops following),
+                    // follow again, or the new one lands out of sight.
+                    // Not while the scrollbar's thumb is held: the snap would
+                    // pull the list from under it.
+                    if was_at_end && !this.list.is_following_tail() && !this.list.is_scrollbar_dragging() {
+                        this.list.set_follow_mode(FollowMode::Tail);
+                    }
                     if ix > 0 {
                         // Grouping of the previous row may have changed.
                         this.list.remeasure_items(ix - 1..ix);
@@ -1506,7 +1541,9 @@ impl ConversationView {
                     if incoming {
                         // Read now if you're looking at the bottom of the chat;
                         // otherwise it waits for you to scroll down.
-                        if was_at_end && this.window_active {
+                        // Following, so it shows (not while the thumb is
+                        // held at the bottom after a jump).
+                        if was_at_end && this.list.is_following_tail() && this.window_active {
                             this.state.read(cx).send(Command::MarkRead { conversation: this.id.clone() });
                         } else {
                             this.unseen += 1;
@@ -4873,10 +4910,13 @@ impl Render for ConversationView {
         let palette = Palette::get(cx);
         let entity = cx.entity();
         // Messages that arrived while scrolled up wait below, even when the
-        // list hasn't measured them yet (it can't tell where its end is then).
+        // list hasn't measured them yet. While any row isn't measured the
+        // list can't say where its end is; then it's whether the newest
+        // showed at the last layout (not `at_end`, which reads row positions
+        // before this frame's layout).
         let scrolled_up = self.has_newer
             || self.unseen > 0
-            || (!self.list.is_following_tail() && !self.list.is_scrolled_to_end().unwrap_or(true));
+            || (!self.list.is_following_tail() && !self.list.is_scrolled_to_end().unwrap_or(self.newest_shown));
 
         div()
             .size_full()
@@ -5523,8 +5563,6 @@ impl ConversationView {
         let Some(message) = self.messages.get(ix) else { return };
         self.targeted = Some(message.id);
         self.list.scroll_to_reveal_item(ix);
-        // A scroll in code doesn't call the scroll handler.
-        self.check_quietly = true;
         window.focus(&self.timeline_focus, cx);
         cx.notify();
     }
@@ -6628,12 +6666,43 @@ mod tests {
         assert_eq!(unread(&backend), 0);
         assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
 
+        // A message that came while scrolled up has no height until the list
+        // lays it out; the next one doesn't take that for being at the
+        // bottom, and both wait.
+        scroll_up_and_arrive(&mut cx, chrono::Utc::now().timestamp_millis() + 7);
+        arrive(&mut cx, &backend, chrono::Utc::now().timestamp_millis() + 8);
+        settle(&mut cx);
+        assert_eq!(unread(&backend), 2);
+        assert_eq!(view.read_with(&cx, |v, _| v.unseen), 2);
+        // Jumping to the newest (as from a search result) lands with a
+        // little above it, which in this short window cuts off its bottom:
+        // not read yet. A taller window shows it whole, which reads them.
+        let newest = view.read_with(&cx, |v, _| v.messages.last().unwrap().id);
+        view.update(&mut cx, |v, cx| v.load_around(newest, cx));
+        settle(&mut cx);
+        assert!(!view.read_with(&cx, |v, _| v.has_newer));
+        assert_eq!(unread(&backend), 2);
+        assert_eq!(view.read_with(&cx, |v, _| v.unseen), 2);
+        cx.simulate_resize(size(px(900.), px(600.)));
+        settle(&mut cx);
+        assert!(view.read_with(&cx, |v, _| v.newest_in_view()), "shown whole");
+        assert_eq!(unread(&backend), 0);
+        assert_eq!(view.read_with(&cx, |v, _| v.unseen), 0);
+        // At the bottom after the jump, which stopped the list following, a
+        // message that comes is read only because it's shown.
+        arrive(&mut cx, &backend, chrono::Utc::now().timestamp_millis() + 9);
+        settle(&mut cx);
+        assert!(view.read_with(&cx, |v, _| v.newest_in_view()), "follows");
+        assert_eq!(unread(&backend), 0);
+        cx.simulate_resize(size(px(900.), px(260.)));
+        settle(&mut cx);
+
         // Jumped back, sending loads the newest. The sent message is saved
         // after the page is read, and still shows.
         view.update(&mut cx, |v, _| v.has_newer = true);
         composer.update(&mut cx, |_, cx| cx.emit(ComposerEvent::Sent));
         assert!(view.read_with(&cx, |v, _| v.reloading.is_some()));
-        let sent_at = chrono::Utc::now().timestamp_millis() + 7;
+        let sent_at = chrono::Utc::now().timestamp_millis() + 10;
         let db = backend.db().clone();
         let sent = signal_store::NewMessage {
             conversation_id: ConversationId(MAYA.into()),
