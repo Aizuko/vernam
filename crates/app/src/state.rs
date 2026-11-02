@@ -100,6 +100,8 @@ pub struct Account {
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     ConversationsChanged,
+    /// The account was unlinked and its data wiped.
+    Unlinked,
     SelectionChanged,
     MessageChanged { conversation: ConversationId, message_id: i64 },
     MessageRemoved { conversation: ConversationId, message_id: i64 },
@@ -280,6 +282,9 @@ pub struct AppState {
     /// A captcha is being solved in the browser (its dialog's Continue
     /// spins), Desktop's challenge status `pending`.
     pub captcha_pending: bool,
+    /// The server asked for a captcha and it isn't done: its dialog opens
+    /// again when the account is shown again (switching closes it).
+    pub captcha_required: bool,
     /// The server's alerts as last connected.
     pub server_alerts: signal_backend::server_alerts::ServerAlerts,
     /// Our clock is too far from the server's.
@@ -375,13 +380,17 @@ pub struct AppState {
     reload_pending: bool,
     /// Demo mode opens the first conversation once loaded.
     auto_select: bool,
-    /// System notifications (`None` where they can't be shown).
-    notifier: Option<std::rc::Rc<crate::notifications::Notifier>>,
+    /// System notifications for this account (`None` where they can't be
+    /// shown), set by `crate::accounts`.
+    pub(crate) notifier: Option<std::rc::Rc<crate::notifications::AccountNotifier>>,
     /// Notifications on screen per chat, taken down once it's read.
     shown_notifications: HashMap<ConversationId, Vec<String>>,
     pub notification_setting: crate::notifications::NotificationSetting,
-    /// The main window is in front (no notifications for the open chat).
+    /// The main window is in front showing this account (no notifications
+    /// for the open chat, and chats read as they're seen).
     pub window_active: bool,
+    /// The window shows this account rather than another of the app's.
+    pub shown: bool,
     /// The message history transfer after linking, while it runs.
     pub history: Option<signal_backend::HistoryProgress>,
     /// The call in progress (Desktop's call screen or incoming call bar).
@@ -511,6 +520,7 @@ impl AppState {
             person_avatars: HashMap::new(),
             unverified: Default::default(),
             captcha_pending: false,
+            captcha_required: false,
             server_alerts: Default::default(),
             clock_skew: false,
             own_profile: None,
@@ -562,6 +572,7 @@ impl AppState {
             shown_notifications: HashMap::new(),
             notification_setting: Default::default(),
             window_active: true,
+            shown: true,
             history: None,
             safety_number: None,
             kt_status: None,
@@ -586,30 +597,35 @@ impl AppState {
             pending_links: Vec::new(),
         };
         this.load_emoji_usage(cx);
-        this.start_notifications(cx);
         this
     }
 
-    fn start_notifications(&mut self, cx: &mut Context<Self>) {
-        use futures::StreamExt as _;
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        self.notifier = crate::notifications::Notifier::start(tx).map(std::rc::Rc::new);
-        if self.notifier.is_none() {
-            return;
+    /// The window shows this account (`shown`) or another of the app's:
+    /// its theme and zoom apply, and it's in front only while shown.
+    pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if shown && !self.shown {
+            crate::prefs::apply(self.prefs.theme, self.prefs.zoom, cx);
         }
-        cx.spawn(async move |this, cx| {
-            while let Some(action) = rx.next().await {
-                if this.update(cx, |this, cx| this.on_notification(action, cx)).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
+        self.shown = shown;
+        self.window_active &= shown;
+        cx.notify();
+    }
+
+    /// Takes down this account's notifications and its part of the Dock's
+    /// badge (it's unlinked, or leaving the app).
+    pub fn forget_notifications(&mut self) {
+        if let Some(notifier) = self.notifier.clone() {
+            let mut shown: Vec<String> = self.shown_notifications.drain().flat_map(|(_, ids)| ids).collect();
+            shown.extend(self.reaction_notifications.drain().flat_map(|(_, ids)| ids));
+            shown.push(INCOMING_CALL_NOTIFICATION.to_owned());
+            notifier.remove(&shown);
+            notifier.set_badge(0);
+        }
     }
 
     /// Something done in a notification: open the chat, send a reply, or
     /// mark it read.
-    fn on_notification(&mut self, action: crate::notifications::NotificationAction, cx: &mut Context<Self>) {
+    pub(crate) fn on_notification(&mut self, action: crate::notifications::NotificationAction, cx: &mut Context<Self>) {
         use crate::notifications::NotificationAction;
         match action {
             NotificationAction::Open(conversation) => {
@@ -1121,9 +1137,13 @@ impl AppState {
                 }
             }
             Event::KeyTransparencyFailed => cx.emit(AppEvent::KeyTransparencyFailed),
-            Event::CaptchaRequired => cx.emit(AppEvent::CaptchaRequired),
+            Event::CaptchaRequired => {
+                self.captcha_required = true;
+                cx.emit(AppEvent::CaptchaRequired);
+            }
             Event::Captcha(result) => {
                 self.captcha_pending = false;
+                self.captcha_required = false;
                 cx.emit(AppEvent::CaptchaDone);
                 if let Err(error) = result {
                     self.report_error(format!("Verification failed: {error}"), cx);
@@ -1327,13 +1347,7 @@ impl AppState {
             }
             Event::Unlinked => {
                 // The old account's notifications and badge go too.
-                if let Some(notifier) = self.notifier.clone() {
-                    let mut shown: Vec<String> = self.shown_notifications.drain().flat_map(|(_, ids)| ids).collect();
-                    shown.extend(self.reaction_notifications.drain().flat_map(|(_, ids)| ids));
-                    shown.push(INCOMING_CALL_NOTIFICATION.to_owned());
-                    notifier.remove(&shown);
-                    notifier.set_badge(0);
-                }
+                self.forget_notifications();
                 self.account = None;
                 // Its megaphones (the backend's check ended with it).
                 self.megaphones.clear();
@@ -1359,6 +1373,7 @@ impl AppState {
                 self.sticker_preview = None;
                 self.unverified.clear();
                 self.captcha_pending = false;
+                self.captcha_required = false;
                 self.server_alerts = Default::default();
                 self.clock_skew = false;
                 self.chat_colors = Default::default();
@@ -1370,7 +1385,9 @@ impl AppState {
                 self.image_optimization = Default::default();
                 self.prefs = Default::default();
                 self.pending_prefs.clear();
-                crate::prefs::apply(self.prefs.theme, self.prefs.zoom, cx);
+                if self.shown {
+                    crate::prefs::apply(self.prefs.theme, self.prefs.zoom, cx);
+                }
                 self.seen_admin_delete_education = false;
                 self.kt_status = None;
                 self.key_transparency_disabled = false;
@@ -1382,6 +1399,8 @@ impl AppState {
                 self.screen = Screen::Link { url: None, error: None };
                 self.backend.send(Command::Link);
                 cx.emit(AppEvent::SelectionChanged);
+                // With other accounts in the app, this one goes.
+                cx.emit(AppEvent::Unlinked);
             }
         }
         cx.notify();
@@ -1678,7 +1697,10 @@ impl AppState {
                     values.insert((*key).to_owned(), Some(value.clone()));
                 }
                 this.prefs = crate::prefs::Prefs::from_values(&values);
-                crate::prefs::apply(this.prefs.theme, this.prefs.zoom, cx);
+                // Another account's theme and zoom are on screen.
+                if this.shown {
+                    crate::prefs::apply(this.prefs.theme, this.prefs.zoom, cx);
+                }
                 cx.notify();
             });
         })

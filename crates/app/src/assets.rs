@@ -103,6 +103,7 @@ const SIGNAL_ICONS: &[(&str, &[u8])] = &[
     ("icons/signal/nav-stories-fill.svg", include_bytes!("../assets/icons/signal/nav-stories-fill.svg")),
     ("icons/signal/nav-settings.svg", include_bytes!("../assets/icons/signal/nav-settings.svg")),
     ("icons/signal/nav-settings-fill.svg", include_bytes!("../assets/icons/signal/nav-settings-fill.svg")),
+    ("icons/signal/nav-plus.svg", include_bytes!("../assets/icons/signal/nav-plus.svg")),
     ("icons/signal/nav-menu.svg", include_bytes!("../assets/icons/signal/nav-menu.svg")),
 ];
 

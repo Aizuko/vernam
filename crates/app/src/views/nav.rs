@@ -1,7 +1,8 @@
 //! Desktop's navigation tabs (`NavTabs`): a rail with "Hide Tabs" at the
 //! top, then Chats, Calls and Stories, and Settings at the bottom. Hidden,
 //! its toggle moves into the chat list's header with the other tabs'
-//! badges (`NavTabsToggle`).
+//! badges (`NavTabsToggle`). With more than one account in the app, they're
+//! listed over Settings (Desktop has one account, so no list).
 
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, App, Entity, Hsla, SharedString, div, px, svg};
@@ -126,8 +127,66 @@ pub fn render(state: &Entity<AppState>, palette: Palette, window: &gpui_kit::Win
         .child(tab_item("nav-calls", "Calls", "phone", NavTab::Calls, 0))
         .when(stories_on, |d| d.child(tab_item("nav-stories", "Stories", "stories", NavTab::Stories, stories)))
         .child(div().flex_1())
+        .children(accounts(palette, cx))
         .child(settings)
         .into_any_element()
+}
+
+/// An account as the switcher names it: its profile name, else its number.
+pub fn account_name(state: &AppState) -> String {
+    let profile = state.own_profile.as_ref().and_then(|profile| profile.name());
+    let phone = state.account.as_ref().and_then(|account| account.phone.clone());
+    match (state.account.as_ref(), profile.or(phone)) {
+        (_, Some(name)) => name,
+        (Some(_), None) => "Signal account".into(),
+        (None, None) => "Not linked yet".into(),
+    }
+}
+
+/// The app's accounts, each its photo with its unread count (but the shown
+/// one's, which the Chats tab has), and "Add account". None with only one.
+fn accounts(palette: Palette, cx: &App) -> Option<AnyElement> {
+    let handle = crate::accounts::get(cx)?;
+    let accounts = handle.read(cx);
+    if accounts.list.len() < 2 {
+        return None;
+    }
+    let rows = accounts.list.iter().enumerate().map(|(index, account)| {
+        let state = account.state.read(cx);
+        let name = account_name(state);
+        let aci = state.our_aci().unwrap_or(&account.entry.id).to_owned();
+        let photo = state.own_profile.as_ref().and_then(|profile| profile.photo.clone());
+        let shown = index == accounts.active;
+        let count = if shown { 0 } else { state.unread_chats_badge() as usize };
+        let id = gpui_kit::ElementId::NamedInteger("nav-account".into(), index as u64);
+        let handle = handle.clone();
+        let tooltip = SharedString::from(name.clone());
+        div().w_full().px(px(10.)).py(px(2.)).child(
+            div()
+                .id(id)
+                .debug_selector(move || format!("nav-account-{index}"))
+                .w_full()
+                .py(px(6.))
+                .flex()
+                .justify_center()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(shown, |d| d.bg(palette.row_selected))
+                .when(!shown, |d| d.hover(|d| d.bg(palette.row_hover)))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
+                .on_click(move |_, _, cx| handle.update(cx, |accounts, cx| accounts.activate(index, cx)))
+                .child(
+                    div()
+                        .relative()
+                        .child(crate::views::common::person_avatar(photo.as_deref(), &name, crate::theme::color_for(&aci), px(28.)))
+                        .children(badge(count, palette)),
+                ),
+        )
+    });
+    let add = item("nav-add-account", "Add Account", "plus", false, 0, palette, |cx| {
+        cx.dispatch_action(&crate::AddAccount);
+    });
+    Some(div().w_full().flex().flex_col().children(rows).child(add).into_any_element())
 }
 
 /// The toggle in the chat list's header while the tabs are hidden ("Show

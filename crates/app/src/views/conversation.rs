@@ -324,7 +324,7 @@ impl ConversationView {
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 // Coming back to the window at the bottom of a chat reads it.
-                if this.window_active && this.at_end() {
+                if this.in_front(cx) && this.at_end() {
                     this.caught_up(cx);
                 }
             }),
@@ -1067,7 +1067,7 @@ impl ConversationView {
     /// messages: read at once, as Desktop's `markOpenConversationRead`.
     fn read_open_poll_votes(&self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        if self.window_active && self.at_end() && state.conversation(&self.id).is_some_and(|c| c.unread_poll_votes) {
+        if self.window_active && state.shown && self.at_end() && state.conversation(&self.id).is_some_and(|c| c.unread_poll_votes) {
             state.send(Command::MarkRead { conversation: self.id.clone() });
         }
     }
@@ -1156,10 +1156,23 @@ impl ConversationView {
         cx.notify();
     }
 
+    /// You can see this chat: the window is in front, showing its account
+    /// (another of the app's accounts' chats stay unread).
+    fn in_front(&self, cx: &App) -> bool {
+        self.window_active && self.state.read(cx).shown
+    }
+
+    /// Its account is shown again: at the bottom, the chat is read.
+    pub fn shown_again(&mut self, cx: &mut Context<Self>) {
+        if self.in_front(cx) && self.at_end() {
+            self.caught_up(cx);
+        }
+    }
+
     /// The newest messages are on screen (and the window is in front): read
     /// them all.
     fn caught_up(&mut self, cx: &mut Context<Self>) {
-        if !self.window_active {
+        if !self.in_front(cx) {
             return;
         }
         let unread = self.state.read(cx).conversation(&self.id).is_some_and(|c| c.unread_count > 0 || c.unread_poll_votes);
@@ -1250,7 +1263,7 @@ impl ConversationView {
             let changed = std::mem::take(&mut self.changed_while_loading);
             // One that arrived as the page was read is in it, and replaying
             // only updates its row: read it if it's in view.
-            if !changed.is_empty() && self.window_active && self.at_end() {
+            if !changed.is_empty() && self.in_front(cx) && self.at_end() {
                 self.state.read(cx).send(Command::MarkRead { conversation: self.id.clone() });
             } else if !changed.is_empty() && self.seen_layout.is_none() {
                 // The new page isn't laid out, so where its end is isn't
@@ -1564,7 +1577,7 @@ impl ConversationView {
                         // otherwise it waits for you to scroll down.
                         // Following, so it shows (not while the thumb is
                         // held short of the very end).
-                        if was_at_end && this.list.is_following_tail() && this.window_active {
+                        if was_at_end && this.list.is_following_tail() && this.in_front(cx) {
                             this.state.read(cx).send(Command::MarkRead { conversation: this.id.clone() });
                         } else {
                             this.unseen += 1;

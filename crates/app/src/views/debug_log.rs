@@ -84,8 +84,10 @@ fn collect(state: &Entity<AppState>, model: &Entity<DebugLog>, cx: &mut App) {
 
 /// The redacted log, assembled off the UI thread.
 pub fn assemble(state: &Entity<AppState>, cx: &mut App) -> gpui_kit::Task<String> {
+    // The logs are the app's, at the top of its data directory, which
+    // holds every account's.
+    let data_dir = crate::accounts::app_dir(cx).unwrap_or_else(|| state.read(cx).backend.data_dir().to_path_buf());
     let state = state.read(cx);
-    let data_dir = state.backend.data_dir().to_path_buf();
     let mut user = Vec::new();
     if let Some(account) = &state.account {
         user.push(("Account".to_owned(), account.aci.clone()));

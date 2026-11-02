@@ -172,7 +172,8 @@ impl Sidebar {
                 | AppEvent::ProfileSaved(_)
                 | AppEvent::UsernameReserved { .. }
                 | AppEvent::UsernameSaved(_)
-                | AppEvent::UsernameLinkReset(_) => {}
+                | AppEvent::UsernameLinkReset(_)
+                | AppEvent::Unlinked => {}
             }),
         ];
         Self {

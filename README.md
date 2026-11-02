@@ -28,6 +28,7 @@ Where Signal's server turns features on or sets limits through remote config, th
 
 ## Beyond Signal Desktop
 
+- **Several accounts at once.** Signal Desktop links one account. Here, File → Add Account… links another, each as its own linked device with its own encrypted database and Keychain key. All of them stay connected: messages, notifications and calls arrive for every account, and the Dock's badge counts every account's unread chats. With two or more, the tabs' rail lists them with their unread counts, and Ctrl-Cmd-1 to 9 switch between them. While one account is in a call, calls to the others are answered "busy", as Signal does during a call. Unlinking an account removes it and its data when there are others. Each account runs its own backend thread, so each adds to the memory figures above, which are for one.
 - **Lossless image optimization.** Signal Desktop redraws every image except GIFs, and past 0.2 MiB sends it as a JPEG at quality 0.7 scaled to at most 1600 pixels (`ts/util/scaleImageToLevel`). Here, images are shrunk without changing a pixel: PNG with [oxipng](https://github.com/shssoichiro/oxipng) at its maximum preset, JPEG with mozjpeg's lossless transcode, location metadata removed, colour profile and rotation kept. TIFF and BMP, which macOS often puts on the clipboard, become PNG losslessly.
 - **Reply from a notification.** Notifications have a reply field and Mark as Read. Desktop's only open the chat.
 - **Emoji search that tolerates typos.** An [`fst`](https://docs.rs/fst) index over names, keywords and shortcodes answers in 2 to 45 µs, matches words in any order, allows one typo (`smlie`), and ranks by your own use.
@@ -55,7 +56,7 @@ SIGNAL_GPUI_DEMO=1 SIGNAL_GPUI_DATA_DIR=/tmp/sg-demo cargo run   # made-up demo 
 SIGNAL_GPUI_BACKGROUND=1 …                                       # open without taking keyboard focus
 ```
 
-The database key lives in the login keychain, and Keychain access depends on the app's code signature: unsigned builds ask for your password after every rebuild. A free "Apple Development" certificate from Xcode stops that, and `scripts/bundle.sh` signs with it. [docs/signing.md](docs/signing.md) has the steps.
+Each account's data is in `accounts/<id>/` in the data directory, beside the app's logs and window position; the first launch of a build with accounts moves the one account's data there. The database key lives in the login keychain, and Keychain access depends on the app's code signature: unsigned builds ask for your password after every rebuild. A free "Apple Development" certificate from Xcode stops that, and `scripts/bundle.sh` signs with it. [docs/signing.md](docs/signing.md) has the steps.
 
 macOS only shows notifications, and only grants camera and microphone access, to an app bundle. `cargo run` runs the app from `target/<profile>/Vernam.app`; for a build you start yourself, `scripts/bundle.sh` makes the bundle. `mise run bundle` does both: it builds release and makes `target/release/Vernam.app`.
 

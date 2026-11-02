@@ -2,8 +2,8 @@
 //!
 //! Signal Desktop generates a random SQLCipher key and protects it with the
 //! OS credential store (Electron `safeStorage`). We do the same: a random
-//! 256-bit key lives in the macOS Keychain. Elsewhere it falls back to a
-//! `0600` key file next to the databases.
+//! 256-bit key lives in the macOS Keychain, one item per account. Elsewhere
+//! it falls back to a `0600` key file next to the databases.
 
 use std::path::Path;
 
@@ -15,8 +15,31 @@ use crate::former_name::FORMER;
 use crate::former_name::Former;
 
 const SERVICE: &str = "vernam";
-#[cfg(target_os = "macos")]
+/// The Keychain item's account name: the app's first account's (from
+/// before there were several), and the others' with their id after it.
 const ACCOUNT: &str = "database-key";
+
+/// Which account's key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyItem {
+    /// Its Keychain item's account name.
+    account: String,
+    /// The account the app had before there were several: its key may
+    /// still be in a former name's item.
+    legacy: bool,
+}
+
+impl KeyItem {
+    /// The key of the account the app had before there were several.
+    pub fn legacy() -> Self {
+        Self { account: ACCOUNT.into(), legacy: true }
+    }
+
+    /// The key of the account with this id.
+    pub fn account(id: &str) -> Self {
+        Self { account: format!("{ACCOUNT}.{id}"), legacy: false }
+    }
+}
 
 /// Where the key lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,9 +62,9 @@ pub struct Loaded {
 /// Loads the database key, creating and storing a new one on first run.
 /// `moved_from`: the former name whose data just moved to `data_dir`, so
 /// its key is the one that opens it.
-pub fn load_or_create(data_dir: &Path, store_kind: KeyStore, moved_from: Option<&'static Former>) -> Result<Loaded> {
+pub fn load_or_create(data_dir: &Path, item: &KeyItem, store_kind: KeyStore, moved_from: Option<&'static Former>) -> Result<Loaded> {
     let existing = match store_kind {
-        KeyStore::System => load(data_dir, moved_from)?,
+        KeyStore::System => load(data_dir, item, moved_from)?,
         KeyStore::File => load_file(data_dir)?.map(|key| Loaded { key, copy_from: None }),
     };
     if let Some(loaded) = existing {
@@ -62,17 +85,38 @@ pub fn load_or_create(data_dir: &Path, store_kind: KeyStore, moved_from: Option<
     // Kept before any database exists: one made without its key kept
     // couldn't be opened again.
     match store_kind {
-        KeyStore::System => store(data_dir, &key)?,
+        KeyStore::System => store(data_dir, item, &key)?,
         KeyStore::File => store_file(data_dir, &key)?,
     }
     Ok(Loaded { key, copy_from: None })
 }
 
+/// Forgets a removed account's key (its data is gone). A key file goes
+/// with its directory.
+pub fn forget(item: &KeyItem, store_kind: KeyStore) {
+    if store_kind == KeyStore::System {
+        delete(item);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn delete(item: &KeyItem) {
+    match security_framework::passwords::delete_generic_password(SERVICE, &item.account) {
+        Ok(()) => {}
+        // errSecItemNotFound
+        Err(e) if e.code() == -25300 => {}
+        Err(error) => tracing::warn!(%error, "couldn't delete the database key {:?}", item.account),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn delete(_item: &KeyItem) {}
+
 /// The key opened the data: one from a former name's item is copied to
 /// [`SERVICE`], and left in that item too, so that app can still read it.
-pub fn keep(data_dir: &Path, loaded: &Loaded) -> Result<()> {
+pub fn keep(data_dir: &Path, item: &KeyItem, loaded: &Loaded) -> Result<()> {
     if let Some(service) = loaded.copy_from {
-        store(data_dir, &loaded.key)?;
+        store(data_dir, item, &loaded.key)?;
         tracing::info!("copied the database key from the Keychain item {service:?} to {SERVICE:?}");
     }
     Ok(())
@@ -90,10 +134,15 @@ fn decode(hex_key: &[u8]) -> Result<[u8; 32]> {
 /// before is for a profile of Vernam's own that's gone: the data moved in
 /// only because Vernam's directory didn't exist). Otherwise Vernam's, then
 /// the former names', newest first, so there's never a new key for
-/// databases an old name's key encrypts.
+/// databases an old name's key encrypts. Only the legacy account's key can
+/// be in a former name's item: an account added since has its own.
 #[cfg(target_os = "macos")]
-fn load(_data_dir: &Path, moved_from: Option<&'static Former>) -> Result<Option<Loaded>> {
-    Ok(find(moved_from, load_service)?.map(|(service, key)| Loaded { key, copy_from: (service != SERVICE).then_some(service) }))
+fn load(_data_dir: &Path, item: &KeyItem, moved_from: Option<&'static Former>) -> Result<Option<Loaded>> {
+    if !item.legacy {
+        return Ok(load_service(SERVICE, &item.account)?.map(|key| Loaded { key, copy_from: None }));
+    }
+    let found = find(moved_from, |service| load_service(service, ACCOUNT))?;
+    Ok(found.map(|(service, key)| Loaded { key, copy_from: (service != SERVICE).then_some(service) }))
 }
 
 /// The first key there is, in [`load`]'s order, and the item it's in.
@@ -116,9 +165,9 @@ fn find(
 }
 
 #[cfg(target_os = "macos")]
-fn load_service(service: &str) -> Result<Option<[u8; 32]>> {
+fn load_service(service: &str, account: &str) -> Result<Option<[u8; 32]>> {
     use security_framework::passwords::get_generic_password;
-    match get_generic_password(service, ACCOUNT) {
+    match get_generic_password(service, account) {
         Ok(bytes) => decode(&bytes).map(Some),
         // errSecItemNotFound
         Err(e) if e.code() == -25300 => Ok(None),
@@ -127,18 +176,18 @@ fn load_service(service: &str) -> Result<Option<[u8; 32]>> {
 }
 
 #[cfg(target_os = "macos")]
-fn store(_data_dir: &Path, key: &[u8; 32]) -> Result<()> {
-    security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, hex::encode(key).as_bytes())
+fn store(_data_dir: &Path, item: &KeyItem, key: &[u8; 32]) -> Result<()> {
+    security_framework::passwords::set_generic_password(SERVICE, &item.account, hex::encode(key).as_bytes())
         .context("storing database key in the Keychain")
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load(data_dir: &Path, _moved_from: Option<&'static Former>) -> Result<Option<Loaded>> {
+fn load(data_dir: &Path, _item: &KeyItem, _moved_from: Option<&'static Former>) -> Result<Option<Loaded>> {
     Ok(load_file(data_dir)?.map(|key| Loaded { key, copy_from: None }))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn store(data_dir: &Path, key: &[u8; 32]) -> Result<()> {
+fn store(data_dir: &Path, _item: &KeyItem, key: &[u8; 32]) -> Result<()> {
     store_file(data_dir, key)
 }
 
@@ -199,14 +248,15 @@ mod tests {
     fn no_new_key_for_databases_that_exist() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("signal.db"), "encrypted").unwrap();
-        let error = load_or_create(dir.path(), KeyStore::File, None).err().unwrap().to_string();
+        let item = KeyItem::account("0a1b");
+        let error = load_or_create(dir.path(), &item, KeyStore::File, None).err().unwrap().to_string();
         assert!(error.contains("found no database key"), "{error}");
         assert!(!dir.path().join("db.key").exists());
         // A new profile gets one, and keeps it.
         let fresh = tempfile::tempdir().unwrap();
-        let key = load_or_create(fresh.path(), KeyStore::File, None).unwrap().key;
+        let key = load_or_create(fresh.path(), &item, KeyStore::File, None).unwrap().key;
         std::fs::write(fresh.path().join("signal.db"), "encrypted").unwrap();
-        assert_eq!(load_or_create(fresh.path(), KeyStore::File, None).unwrap().key, key);
+        assert_eq!(load_or_create(fresh.path(), &item, KeyStore::File, None).unwrap().key, key);
     }
 
     #[test]

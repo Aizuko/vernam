@@ -159,7 +159,7 @@ fn move_newest(
 }
 
 #[cfg(target_os = "macos")]
-fn alert(message: &str, detail: &str) {
+pub fn alert(message: &str, detail: &str) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSAlert, NSApplication};
     use objc2_foundation::NSString;
@@ -177,7 +177,7 @@ fn alert(message: &str, detail: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn alert(message: &str, detail: &str) {
+pub fn alert(message: &str, detail: &str) {
     eprintln!("{message}: {detail}");
 }
 

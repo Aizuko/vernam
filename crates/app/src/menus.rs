@@ -7,7 +7,7 @@ use gpui_kit::component::input::{Copy, Cut, Delete, Paste, Redo, SelectAll, Undo
 use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window};
 
 use crate::shortcuts::ShowKeyboardShortcuts;
-use crate::{About, CreateStickerPack, OpenSettings, Quit, ShowDebugLog};
+use crate::{About, AddAccount, CreateStickerPack, OpenSettings, Quit, ShowDebugLog};
 
 gpui_kit::actions!(
     signal,
@@ -74,6 +74,8 @@ pub fn install(cx: &mut App) {
             MenuItem::action("Quit Vernam", Quit),
         ]),
         Menu::new("File").items([
+            MenuItem::action("Add Account…", AddAccount),
+            MenuItem::separator(),
             MenuItem::action("Create/upload sticker pack", CreateStickerPack),
             MenuItem::separator(),
             MenuItem::action("Close Window", CloseWindow),

@@ -19,6 +19,9 @@ const SETTING_SIDEBAR_WIDTH: &str = "sidebar_width";
 /// What's dragged to resize the chat list.
 struct SidebarResize;
 
+/// How many of a hidden account's dialogs and messages wait for it.
+const MAX_HELD: usize = 8;
+
 pub struct RootView {
     state: Entity<AppState>,
     sidebar: Entity<Sidebar>,
@@ -44,6 +47,9 @@ pub struct RootView {
     /// Counts account changes, so a width read for an earlier account
     /// isn't applied to the next.
     account_generation: u64,
+    /// What the state asked for while another account was shown (see
+    /// `on_event`), oldest first.
+    pub(crate) held: Vec<AppEvent>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -58,113 +64,14 @@ impl RootView {
             // No notifications for the chat you're looking at.
             cx.observe_window_activation(window, |this, window, cx| {
                 let active = window.is_window_active();
-                this.state.update(cx, |state, _| state.window_active = active);
+                // In front only while the window shows this account.
+                this.state.update(cx, |state, _| state.window_active = active && state.shown);
                 // Desktop refreshes its remote config when it becomes active.
                 if active {
                     this.state.read(cx).send(signal_backend::Command::RefreshRemoteConfig);
                 }
             }),
-            cx.subscribe_in(&state, window, |this, state, event: &AppEvent, window, cx| {
-                if let AppEvent::ViewImage(image) = event {
-                    // One viewer at a time: stepping from a video to a photo swaps them.
-                    this.video_viewer = None;
-                    let viewer = cx.new(|cx| ImageViewer::new(image.clone(), Some(state.clone()), cx));
-                    window.focus(&viewer.focus_handle(cx), cx);
-                    let closed = cx.subscribe_in(&viewer, window, |this, _, _: &ViewerEvent, window, cx| {
-                        this.viewer = None;
-                        // Back to typing where you were.
-                        if let Some(conversation) = &this.conversation {
-                            window.focus(&conversation.focus_handle(cx), cx);
-                        }
-                        cx.notify();
-                    });
-                    this.viewer = Some((viewer, closed));
-                    cx.notify();
-                }
-                if let AppEvent::ViewVideo(video) = event {
-                    this.viewer = None;
-                    let viewer = cx.new(|cx| crate::views::video_viewer::VideoViewer::new(video.clone(), Some(state.clone()), cx));
-                    window.focus(&viewer.focus_handle(cx), cx);
-                    let closed = cx.subscribe_in(&viewer, window, |this, _, _: &ViewerEvent, window, cx| {
-                        // Dropping it stops the video.
-                        this.video_viewer = None;
-                        if let Some(conversation) = &this.conversation {
-                            window.focus(&conversation.focus_handle(cx), cx);
-                        }
-                        cx.notify();
-                    });
-                    this.video_viewer = Some((viewer, closed));
-                    cx.notify();
-                }
-                if let AppEvent::ViewStories(chat) = event {
-                    let viewer = cx.new(|cx| crate::views::story_viewer::StoryViewer::new(state.clone(), chat.clone(), window, cx));
-                    window.focus(&viewer.focus_handle(cx), cx);
-                    let closed = cx.subscribe_in(&viewer, window, |this, _, _: &ViewerEvent, _, cx| {
-                        // Dropping it stops a video.
-                        this.story_viewer = None;
-                        cx.notify();
-                    });
-                    this.story_viewer = Some((viewer, closed));
-                    cx.notify();
-                }
-                if let AppEvent::CreateStory(media) = event {
-                    let creator = cx.new(|cx| match media.clone() {
-                        None => crate::views::story_creator::StoryCreator::text(state.clone(), window, cx),
-                        Some((bytes, content_type, path)) => {
-                            crate::views::story_creator::StoryCreator::media(state.clone(), bytes, content_type, path, window, cx)
-                        }
-                    });
-                    window.focus(&creator.focus_handle(cx), cx);
-                    let closed = cx.subscribe_in(&creator, window, |this, _, _: &ViewerEvent, _, cx| {
-                        this.story_creator = None;
-                        cx.notify();
-                    });
-                    this.story_creator = Some((creator, closed));
-                    cx.notify();
-                }
-                if let AppEvent::Error(message) = event {
-                    use gpui_kit::component::WindowExt as _;
-                    window.push_notification(gpui_kit::component::notification::Notification::error(message.clone()), cx);
-                }
-                if let AppEvent::OpenStickerPack = event {
-                    crate::views::sticker_manager::open_preview(state.clone(), window, cx);
-                }
-                if let AppEvent::GroupLinkPreview(preview) = event {
-                    crate::views::group_admin::open_join(state.clone(), preview.clone(), window, cx);
-                }
-                if let AppEvent::Alert { title, description } = event {
-                    use gpui_kit::component::WindowExt as _;
-                    let (title, description) = (title.clone(), description.clone());
-                    window.open_alert_dialog(cx, move |alert, _, _| alert.title(title.clone()).description(description.clone()));
-                }
-                if let AppEvent::Info(message) = event {
-                    use gpui_kit::component::WindowExt as _;
-                    window.push_notification(gpui_kit::component::notification::Notification::new().message(message.clone()), cx);
-                }
-                if let AppEvent::KeyTransparencyFailed = event {
-                    crate::views::safety_number::show_error(state.clone(), window, cx);
-                }
-                if let AppEvent::CaptchaRequired = event {
-                    crate::views::challenge::open_captcha(state.clone(), window, cx);
-                }
-                if let AppEvent::CaptchaDone = event {
-                    use gpui_kit::component::WindowExt as _;
-                    window.close_all_dialogs(cx);
-                }
-                if let AppEvent::CriticalAlertModal = event {
-                    crate::views::challenge::open_critical_modal(state.clone(), window, cx);
-                }
-                if let AppEvent::SelectionChanged = event {
-                    let selected = state.read(cx).selected.clone();
-                    this.conversation = selected.map(|id| {
-                        let view = cx.new(|cx| ConversationView::new(state.clone(), this.picker.clone(), id, window, cx));
-                        let handle = view.read(cx).focus_handle(cx);
-                        window.focus(&handle, cx);
-                        view
-                    });
-                    cx.notify();
-                }
-            }),
+            cx.subscribe_in(&state, window, |this, state, event: &AppEvent, window, cx| this.on_event(state, event, window, cx)),
             cx.observe_in(&state, window, |this, state, window, cx| {
                 this.follow_account(cx);
                 let (active, fills) = {
@@ -186,7 +93,11 @@ impl RootView {
                     }
                     (_, false) if this.call_focused => {
                         this.call_focused = false;
-                        if let Some(conversation) = &this.conversation {
+                        // (A hidden account's call was over another's,
+                        // which `crate::views::window` gives the keyboard back to.)
+                        if state.read(cx).shown
+                            && let Some(conversation) = &this.conversation
+                        {
                             window.focus(&conversation.focus_handle(cx), cx);
                         }
                     }
@@ -215,6 +126,7 @@ impl RootView {
             sidebar_preferred: crate::sidebar_width::DEFAULT_WIDTH,
             account: None,
             account_generation: 0,
+            held: Vec::new(),
             _subscriptions: subscriptions,
         };
         this.follow_account(cx);
@@ -273,7 +185,183 @@ impl RootView {
         cx.notify();
     }
 
-    /// Desktop's `expandNarrowLeftPane`.
+    /// What the state asks of the window. A hidden account's dialogs and
+    /// messages wait until it's shown (as `crate::views::window` does), so
+    /// they don't open over another account's.
+    fn on_event(&mut self, state: &Entity<AppState>, event: &AppEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let waits = matches!(
+            event,
+            AppEvent::Error(_)
+                | AppEvent::Info(_)
+                | AppEvent::Alert { .. }
+                | AppEvent::KeyTransparencyFailed
+                | AppEvent::CaptchaRequired
+                | AppEvent::CriticalAlertModal
+                | AppEvent::GroupLinkPreview(_)
+                | AppEvent::OpenStickerPack
+        );
+        if !state.read(cx).shown {
+            if waits {
+                self.held.push(event.clone());
+                // A burst of errors needn't all wait.
+                if self.held.len() > MAX_HELD {
+                    self.held.remove(0);
+                }
+                return;
+            }
+            if let AppEvent::CaptchaDone = event {
+                self.held.retain(|held| !matches!(held, AppEvent::CaptchaRequired));
+                return;
+            }
+            // A viewer asked for before switching away: not opened unseen
+            // (it would take the keyboard from the account shown).
+            if matches!(event, AppEvent::ViewImage(_) | AppEvent::ViewVideo(_) | AppEvent::ViewStories(_) | AppEvent::CreateStory(_)) {
+                return;
+            }
+        }
+        let this = self;
+        if let AppEvent::ViewImage(image) = event {
+            // One viewer at a time: stepping from a video to a photo swaps them.
+            this.video_viewer = None;
+            let viewer = cx.new(|cx| ImageViewer::new(image.clone(), Some(state.clone()), cx));
+            window.focus(&viewer.focus_handle(cx), cx);
+            let closed = cx.subscribe_in(&viewer, window, |this, _, _: &ViewerEvent, window, cx| {
+                this.viewer = None;
+                // Back to typing where you were.
+                if let Some(conversation) = &this.conversation {
+                    window.focus(&conversation.focus_handle(cx), cx);
+                }
+                cx.notify();
+            });
+            this.viewer = Some((viewer, closed));
+            cx.notify();
+        }
+        if let AppEvent::ViewVideo(video) = event {
+            this.viewer = None;
+            let viewer = cx.new(|cx| crate::views::video_viewer::VideoViewer::new(video.clone(), Some(state.clone()), cx));
+            window.focus(&viewer.focus_handle(cx), cx);
+            let closed = cx.subscribe_in(&viewer, window, |this, _, _: &ViewerEvent, window, cx| {
+                // Dropping it stops the video.
+                this.video_viewer = None;
+                if let Some(conversation) = &this.conversation {
+                    window.focus(&conversation.focus_handle(cx), cx);
+                }
+                cx.notify();
+            });
+            this.video_viewer = Some((viewer, closed));
+            cx.notify();
+        }
+        if let AppEvent::ViewStories(chat) = event {
+            let viewer = cx.new(|cx| crate::views::story_viewer::StoryViewer::new(state.clone(), chat.clone(), window, cx));
+            window.focus(&viewer.focus_handle(cx), cx);
+            let closed = cx.subscribe_in(&viewer, window, |this, _, _: &ViewerEvent, _, cx| {
+                // Dropping it stops a video.
+                this.story_viewer = None;
+                cx.notify();
+            });
+            this.story_viewer = Some((viewer, closed));
+            cx.notify();
+        }
+        if let AppEvent::CreateStory(media) = event {
+            let creator = cx.new(|cx| match media.clone() {
+                None => crate::views::story_creator::StoryCreator::text(state.clone(), window, cx),
+                Some((bytes, content_type, path)) => {
+                    crate::views::story_creator::StoryCreator::media(state.clone(), bytes, content_type, path, window, cx)
+                }
+            });
+            window.focus(&creator.focus_handle(cx), cx);
+            let closed = cx.subscribe_in(&creator, window, |this, _, _: &ViewerEvent, _, cx| {
+                this.story_creator = None;
+                cx.notify();
+            });
+            this.story_creator = Some((creator, closed));
+            cx.notify();
+        }
+        if let AppEvent::Error(message) = event {
+            use gpui_kit::component::WindowExt as _;
+            window.push_notification(gpui_kit::component::notification::Notification::error(message.clone()), cx);
+        }
+        if let AppEvent::OpenStickerPack = event {
+            crate::views::sticker_manager::open_preview(state.clone(), window, cx);
+        }
+        if let AppEvent::GroupLinkPreview(preview) = event {
+            crate::views::group_admin::open_join(state.clone(), preview.clone(), window, cx);
+        }
+        if let AppEvent::Alert { title, description } = event {
+            use gpui_kit::component::WindowExt as _;
+            let (title, description) = (title.clone(), description.clone());
+            window.open_alert_dialog(cx, move |alert, _, _| alert.title(title.clone()).description(description.clone()));
+        }
+        if let AppEvent::Info(message) = event {
+            use gpui_kit::component::WindowExt as _;
+            window.push_notification(gpui_kit::component::notification::Notification::new().message(message.clone()), cx);
+        }
+        if let AppEvent::KeyTransparencyFailed = event {
+            crate::views::safety_number::show_error(state.clone(), window, cx);
+        }
+        if let AppEvent::CaptchaRequired = event {
+            crate::views::challenge::open_captcha(state.clone(), window, cx);
+        }
+        if let AppEvent::CaptchaDone = event {
+            use gpui_kit::component::WindowExt as _;
+            window.close_all_dialogs(cx);
+        }
+        if let AppEvent::CriticalAlertModal = event {
+            crate::views::challenge::open_critical_modal(state.clone(), window, cx);
+        }
+        if let AppEvent::SelectionChanged = event {
+            let (selected, shown) = {
+                let state = state.read(cx);
+                (state.selected.clone(), state.shown)
+            };
+            this.conversation = selected.map(|id| {
+                let view = cx.new(|cx| ConversationView::new(state.clone(), this.picker.clone(), id, window, cx));
+                // (Another account's window has the keyboard.)
+                if shown {
+                    let handle = view.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+                view
+            });
+            cx.notify();
+        }
+    }
+
+    /// The account comes into view: the keyboard goes to its call, its
+    /// open chat, or its chat list's search.
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // What it asked for while hidden.
+        let state = self.state.clone();
+        for event in std::mem::take(&mut self.held) {
+            self.on_event(&state, &event, window, cx);
+        }
+        // A captcha closed with the last account's dialogs, still to solve.
+        use gpui_kit::component::WindowExt as _;
+        if self.state.read(cx).captcha_required && !window.has_active_dialog(cx) {
+            crate::views::challenge::open_captcha(self.state.clone(), window, cx);
+        }
+        // Its open chat, read if you're at the bottom of it.
+        if let Some(conversation) = &self.conversation {
+            conversation.update(cx, |conversation, cx| conversation.shown_again(cx));
+        }
+        if let Some(call) = self.call.as_ref().filter(|_| self.call_focused) {
+            window.focus(&call.focus_handle(cx), cx);
+        } else if let Some(conversation) = &self.conversation {
+            window.focus(&conversation.focus_handle(cx), cx);
+        } else {
+            let search = self.sidebar.read(cx).search_input();
+            search.update(cx, |search, cx| search.focus(window, cx));
+        }
+    }
+
+    /// The lobby or call screen, when it's showing (shown over another
+    /// account's window too, as `crate::views::window` does).
+    pub fn call_view(&self, cx: &App) -> Option<Entity<crate::views::call::CallView>> {
+        let state = self.state.read(cx);
+        let shown = matches!(state.screen, Screen::Main) && (state.call.is_some() || state.lobby.is_some());
+        self.call.clone().filter(|_| shown)
+    }
+
     /// The main window's open, linked and caught up.
     fn ready(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
@@ -453,6 +541,7 @@ impl RootView {
         }
     }
 
+    /// Desktop's `expandNarrowLeftPane`.
     fn expand_sidebar(&mut self, cx: &mut Context<Self>) {
         if self.sidebar_preferred < crate::sidebar_width::MIN_FULL_WIDTH {
             self.sidebar_preferred = crate::sidebar_width::MIN_FULL_WIDTH;

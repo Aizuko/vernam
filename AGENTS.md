@@ -16,6 +16,15 @@ When behavior is in question (what a read sync marks, how a reaction finds its t
 
 presage stores the first profile, profile photo and group photo it downloads and never refreshes them. Anything that can change needs a fresh fetch: `profiles.rs` asks the server for the current avatar path, and `refresh_group_avatar` compares the group's avatar path. Name saved files after the remote path (hashed), so a changed path means a new download. Profile fetches are rate limited: check each person at most daily and cap each sync, as Desktop's routine profile refresh does.
 
+## Several accounts
+
+The app runs every account at once, each with its own backend thread, database, key (`database-key.<id>` in the Keychain; the first account keeps `database-key`) and directory (`accounts/<id>/`). Anything process-wide is shared by all of them, so it must be per account or follow the account on screen:
+
+- `remote_config::current()` is the backend thread's own account's config (a thread-local the backend installs). The interface reads `AppState::remote_config()`, never a global, and functions it calls take the config.
+- One notification center serves every account: `AccountNotifier` prefixes ids and threads with the account, and the Dock's badge adds them up.
+- Theme and zoom are account settings; only the shown account's apply (`AppState::shown`). `window_active` means the window is in front *and* shows that account, which is what reading chats and suppressing notifications need.
+- Calls: `CallLines` tells each backend whether another account is in a call, so it answers "busy".
+
 ## Database
 
 - **Every store transaction starts with `BEGIN IMMEDIATE`** (`AppDb::write`). A deferred transaction that reads and then writes fails at once with "database is locked" when another connection committed in between; the busy timeout doesn't apply. This aborted a history import while messages were arriving.

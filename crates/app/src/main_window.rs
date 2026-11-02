@@ -13,7 +13,7 @@ use gpui_kit::{
 };
 
 use crate::state::AppState;
-use crate::views::root::RootView;
+use crate::views::window::WindowView;
 use crate::window_state::{self, WindowState};
 
 /// The window's size before it's ever been resized, and the smallest it
@@ -31,7 +31,7 @@ const HANG_UP_WAIT: Duration = Duration::from_secs(2);
 
 /// What reopening the window needs.
 struct MainWindow {
-    state: Entity<AppState>,
+    accounts: Entity<crate::accounts::Accounts>,
     data_dir: PathBuf,
     /// Opens without taking focus (`SIGNAL_GPUI_BACKGROUND`).
     background: bool,
@@ -48,10 +48,11 @@ struct MainWindow {
 
 impl Global for MainWindow {}
 
-/// Opens the main window at its saved size and place (or the default).
-pub fn open(state: Entity<AppState>, data_dir: PathBuf, background: bool, cx: &mut App) -> anyhow::Result<()> {
+/// Opens the main window at its saved size and place (or the default),
+/// showing `accounts`.
+pub fn open(accounts: Entity<crate::accounts::Accounts>, data_dir: PathBuf, background: bool, cx: &mut App) -> anyhow::Result<()> {
     let saved = window_state::load(&data_dir);
-    cx.set_global(MainWindow { state, data_dir, background, save: None, quitting: false, window: None, pending_fullscreen: false });
+    cx.set_global(MainWindow { accounts, data_dir, background, save: None, quitting: false, window: None, pending_fullscreen: false });
     let bounds = initial_bounds(saved, cx);
     open_window(bounds, cx)
 }
@@ -69,9 +70,9 @@ fn initial_bounds(saved: Option<WindowState>, cx: &App) -> WindowBounds {
 }
 
 fn open_window(bounds: WindowBounds, cx: &mut App) -> anyhow::Result<()> {
-    let (state, background) = {
+    let (accounts, background) = {
         let main = cx.global::<MainWindow>();
-        (main.state.clone(), main.background)
+        (main.accounts.clone(), main.background)
     };
     // Full screen comes once the window is up and active, as Desktop's
     // `setFullScreen` after `new BrowserWindow` (app/main.main.ts); opened in
@@ -106,7 +107,7 @@ fn open_window(bounds: WindowBounds, cx: &mut App) -> anyhow::Result<()> {
         cx.new(|cx| {
             cx.observe_window_bounds(window, |_, window, cx| schedule_save(window, cx)).detach();
             cx.observe_window_activation(window, |_, window, cx| enter_pending_fullscreen(window, cx)).detach();
-            RootView::new(state.clone(), window, cx)
+            WindowView::new(accounts.clone(), window, cx)
         })
     })?;
     cx.global_mut::<MainWindow>().window = Some(window);
@@ -129,9 +130,11 @@ fn enter_pending_fullscreen(window: &mut Window, cx: &mut App) {
     }
 }
 
-/// The app's state, once the window has been opened.
+/// The state of the account the window shows, once it's been opened.
 pub fn state(cx: &App) -> Option<Entity<AppState>> {
-    cx.try_global::<MainWindow>().map(|main| main.state.clone())
+    let main = cx.try_global::<MainWindow>()?;
+    let accounts = main.accounts.read(cx);
+    accounts.list.get(accounts.active).map(|account| account.state.clone())
 }
 
 /// The main window, if it's open (shown or hidden).
@@ -180,14 +183,12 @@ fn should_close(window: &mut Window, cx: &mut App) -> bool {
     if cx.try_global::<MainWindow>().is_none_or(|m| m.quitting) {
         return true;
     }
-    let state = cx.global::<MainWindow>().state.clone();
-    if in_call(&state, cx) {
-        confirm_end_call(window, cx, move |window, cx| {
+    match in_call(cx) {
+        Some(state) => confirm_end_call(window, cx, move |window, cx| {
             state.update(cx, |state, _| state.hang_up());
             hide(window, cx);
-        });
-    } else {
-        hide(window, cx);
+        }),
+        None => hide(window, cx),
     }
     false
 }
@@ -202,8 +203,10 @@ pub fn close(window: &mut Window, cx: &mut App) {
     }
 }
 
-fn in_call(state: &Entity<AppState>, cx: &App) -> bool {
-    state.read(cx).call.is_some()
+/// The account in a call, if any (one at a time).
+fn in_call(cx: &App) -> Option<Entity<AppState>> {
+    let accounts = cx.try_global::<MainWindow>()?.accounts.read(cx);
+    accounts.in_call(cx).map(|index| accounts.list[index].state.clone())
 }
 
 /// Hides the window, leaving full screen first as Desktop does (closing a
@@ -258,27 +261,26 @@ pub fn quit(cx: &mut App) {
 }
 
 fn quit_deferred(cx: &mut App) {
-    let Some(main) = cx.try_global::<MainWindow>() else {
+    if cx.try_global::<MainWindow>().is_none() {
         cx.quit();
         return;
-    };
-    let state = main.state.clone();
-    if !in_call(&state, cx) {
+    }
+    let Some(state) = in_call(cx) else {
         quit_now(cx);
         return;
-    }
+    };
     show_now(cx);
     let Some(window) = handle(cx) else {
         quit_now(cx);
         return;
     };
     let _ = window.update(cx, |_, window, cx| {
-        confirm_end_call(window, cx, |_, cx| {
-            let state = cx.global::<MainWindow>().state.clone();
+        confirm_end_call(window, cx, move |_, cx| {
             state.update(cx, |state, _| state.hang_up());
+            let state = state.clone();
             cx.spawn(async move |cx| {
                 let mut waited = Duration::ZERO;
-                while waited < HANG_UP_WAIT && cx.update(|cx| in_call(&state, cx)) {
+                while waited < HANG_UP_WAIT && cx.update(|cx| state.read(cx).call.is_some()) {
                     cx.background_executor().timer(Duration::from_millis(50)).await;
                     waited += Duration::from_millis(50);
                 }
@@ -375,24 +377,15 @@ pub(crate) mod tests {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
         let config = signal_backend::Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new(), call_lines: Default::default() };
-        let (backend, mut events) = signal_backend::Backend::start(config).unwrap();
-        let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
-        cx.update(|cx| {
-            use futures::StreamExt as _;
-            let state = state.clone();
-            cx.spawn(async move |cx| {
-                while let Some(event) = events.next().await {
-                    state.update(cx, |state, cx| state.handle(event, cx));
-                }
-            })
-            .detach();
-        });
+        let (backend, events) = signal_backend::Backend::start(config).unwrap();
         let data_dir = dir.path().join("window");
         std::fs::create_dir_all(&data_dir).unwrap();
+        let accounts = cx.update(|cx| crate::accounts::Accounts::for_test(data_dir.clone(), vec![(backend.clone(), events)], cx));
+        let state = accounts.read_with(cx, |accounts, _| accounts.list[0].state.clone());
         if let Some(saved) = saved {
             window_state::save(&data_dir, &saved);
         }
-        cx.update(|cx| open(state.clone(), data_dir, true, cx)).unwrap();
+        cx.update(|cx| open(accounts, data_dir, true, cx)).unwrap();
         let window = cx.update(|cx| handle(cx)).expect("the main window");
         (backend, state, window, dir)
     }

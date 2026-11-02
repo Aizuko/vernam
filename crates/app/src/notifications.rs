@@ -75,6 +75,77 @@ pub struct Notification<'a> {
     pub sound: bool,
 }
 
+/// Between an account's id and what it names in a notification's id and
+/// thread (a chat): neither a conversation id nor an account id has it.
+const ACCOUNT_SEPARATOR: char = '|';
+
+/// One account's notifications, through the app's one [`Notifier`]: their
+/// ids and threads name the account, so that what's done in one goes to
+/// it, and the Dock's badge adds up every account's unread count.
+pub struct AccountNotifier {
+    notifier: std::rc::Rc<Notifier>,
+    account: String,
+    badges: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, usize>>>,
+}
+
+impl AccountNotifier {
+    pub fn new(
+        notifier: std::rc::Rc<Notifier>,
+        account: String,
+        badges: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, usize>>>,
+    ) -> Self {
+        Self { notifier, account, badges }
+    }
+
+    fn scoped(&self, id: &str) -> String {
+        format!("{}{ACCOUNT_SEPARATOR}{id}", self.account)
+    }
+
+    pub fn post(&self, notification: &Notification) {
+        let id = self.scoped(notification.id);
+        let conversation = ConversationId(self.scoped(&notification.conversation.0));
+        self.notifier.post(&Notification { id: &id, conversation: &conversation, ..*notification });
+    }
+
+    pub fn remove(&self, ids: &[String]) {
+        let ids: Vec<String> = ids.iter().map(|id| self.scoped(id)).collect();
+        self.notifier.remove(&ids);
+    }
+
+    /// This account's unread count; the Dock shows every account's.
+    pub fn set_badge(&self, count: usize) {
+        let total = {
+            let mut badges = self.badges.borrow_mut();
+            badges.insert(self.account.clone(), count);
+            badges.values().sum()
+        };
+        self.notifier.set_badge(total);
+    }
+}
+
+/// The account a notification's action is for (`None` for one posted
+/// before there were several), and the action with its chat.
+pub fn route(action: NotificationAction) -> (Option<String>, NotificationAction) {
+    let split = |conversation: ConversationId| match conversation.0.split_once(ACCOUNT_SEPARATOR) {
+        Some((account, chat)) => (Some(account.to_owned()), ConversationId(chat.to_owned())),
+        None => (None, conversation),
+    };
+    match action {
+        NotificationAction::Open(conversation) => {
+            let (account, conversation) = split(conversation);
+            (account, NotificationAction::Open(conversation))
+        }
+        NotificationAction::Reply(conversation, text) => {
+            let (account, conversation) = split(conversation);
+            (account, NotificationAction::Reply(conversation, text))
+        }
+        NotificationAction::MarkRead(conversation) => {
+            let (account, conversation) = split(conversation);
+            (account, NotificationAction::MarkRead(conversation))
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub use macos::Notifier;
 
@@ -267,6 +338,19 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actions_go_to_the_account_that_posted() {
+        let chat = ConversationId("g:Ab/c+d==".into());
+        let posted = ConversationId(format!("0a1b{ACCOUNT_SEPARATOR}{}", chat.0));
+        assert_eq!(route(NotificationAction::MarkRead(posted.clone())), (Some("0a1b".into()), NotificationAction::MarkRead(chat.clone())));
+        assert_eq!(
+            route(NotificationAction::Reply(posted, "hi".into())),
+            (Some("0a1b".into()), NotificationAction::Reply(chat.clone(), "hi".into()))
+        );
+        // From before there were several accounts.
+        assert_eq!(route(NotificationAction::Open(chat.clone())), (None, NotificationAction::Open(chat)));
+    }
 
     #[test]
     fn notification_text_follows_the_setting() {

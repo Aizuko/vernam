@@ -48,6 +48,19 @@ pub fn render(state: &Entity<AppState>, window: &mut Window, cx: &mut App) -> im
             .into_any_element(),
     };
 
+    // An account being added, while there are others to go back to.
+    let cancel = crate::accounts::get(cx).and_then(|handle| {
+        let accounts = handle.clone();
+        let list = handle.read(cx);
+        let index = list.list.iter().position(|account| account.state == *state)?;
+        let id = list.list[index].entry.id.clone();
+        list.can_cancel(index, cx).then(|| {
+            Button::new("link-cancel").label("Cancel").outline().on_click(move |_, _, cx| {
+                accounts.update(cx, |accounts, cx| accounts.remove_account(&id, cx));
+            })
+        })
+    });
+
     let step = |n: u8, text: &'static str| {
         div()
             .flex()
@@ -93,7 +106,8 @@ pub fn render(state: &Entity<AppState>, window: &mut Window, cx: &mut App) -> im
                                 .text_sm()
                                 .text_color(palette.text_secondary)
                                 .child("Messages are end-to-end encrypted. This device keeps its own encrypted database."),
-                        ),
+                        )
+                        .when_some(cancel, |d, cancel| d.child(div().mt_2().child(cancel))),
                 ),
         )
 }

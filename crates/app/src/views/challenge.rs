@@ -86,6 +86,7 @@ fn confirm_skip(state: Entity<AppState>, window: &mut Window, cx: &mut App) {
                     .child(Button::new("captcha-skip-confirm").label("Skip verification").danger().on_click(move |_, window, cx| {
                         skip.update(cx, |state, _| {
                             state.captcha_pending = false;
+                            state.captcha_required = false;
                             state.send(signal_backend::Command::SkipCaptcha);
                         });
                         window.close_all_dialogs(cx);

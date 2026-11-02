@@ -1,5 +1,6 @@
 //! Vernam: a native client for Signal, unofficial, after Signal Desktop.
 
+mod accounts;
 mod assets;
 mod avatar_presets;
 mod chat_color;
@@ -40,14 +41,19 @@ use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use gpui_kit::component::Theme;
 use gpui_kit::{App, KeyBinding};
-use signal_backend::{Backend, Config};
 
 
-gpui_kit::actions!(signal, [Quit, About, OpenSettings, ShowDebugLog, FocusSearch, SearchInChat, NextConversation, PreviousConversation, CreateStickerPack]);
+gpui_kit::actions!(signal, [Quit, About, OpenSettings, ShowDebugLog, FocusSearch, SearchInChat, NextConversation, PreviousConversation, CreateStickerPack, AddAccount]);
+
+/// Shows the app's account at this index (Ctrl-Cmd-1 to 9).
+#[derive(Clone, PartialEq, gpui_kit::Action)]
+#[action(namespace = signal, no_json)]
+pub struct SwitchAccount(pub usize);
 
 /// `$SIGNAL_GPUI_DATA_DIR` (a development profile, keyed by a file), or the
 /// platform's application data directory (keyed by the Keychain), where
 /// the data of a former name (Ziggy, Signal GPUI) moves on first launch.
+/// Each account's data is in a directory of its own in it (`accounts`).
 fn data_dir() -> Result<(PathBuf, keys::KeyStore, former_name::Moved)> {
     if let Some(dir) = std::env::var_os("SIGNAL_GPUI_DATA_DIR") {
         return Ok((PathBuf::from(dir), keys::KeyStore::File, former_name::Moved::Nothing));
@@ -57,6 +63,13 @@ fn data_dir() -> Result<(PathBuf, keys::KeyStore, former_name::Moved)> {
         .context("no home directory")?;
     let moved = former_name::move_data(&dir)?;
     Ok((dir, keys::KeyStore::System, moved))
+}
+
+/// Another Vernam process is running (not this one).
+fn other_vernam_running() -> bool {
+    let Ok(output) = std::process::Command::new("pgrep").args(["-x", "vernam"]).output() else { return false };
+    let me = std::process::id().to_string();
+    String::from_utf8_lossy(&output.stdout).lines().any(|pid| pid.trim() != me)
 }
 
 fn device_name() -> String {
@@ -116,36 +129,6 @@ fn init_logging(data_dir: &std::path::Path) -> Option<tracing_appender::non_bloc
     guard
 }
 
-fn start_backend(
-    data_dir: PathBuf,
-    key_store: keys::KeyStore,
-    moved_from: Option<&'static former_name::Former>,
-) -> Result<(Backend, futures::channel::mpsc::UnboundedReceiver<signal_backend::Event>)> {
-    let loaded = keys::load_or_create(&data_dir, key_store, moved_from)?;
-    tracing::info!("data directory: {}", data_dir.display());
-    let started = Backend::start(Config {
-        data_dir: data_dir.clone(),
-        db_key: loaded.key,
-        device_name: device_name(),
-        demo: std::env::var_os("SIGNAL_GPUI_DEMO").is_some(),
-        // The paths stored under a former name name its directory, even
-        // once the data has moved.
-        former_data_dirs: match key_store {
-            keys::KeyStore::System => former_name::former_data_dirs(),
-            keys::KeyStore::File => Vec::new(),
-        },
-        call_lines: Default::default(),
-    })?;
-    // The key opened the data: kept as Vernam's, after which where moved-in
-    // data came from is done with. If keeping it fails, the next launch
-    // tries again in the same order.
-    match keys::keep(&data_dir, &loaded) {
-        Ok(()) => former_name::key_settled(&data_dir),
-        Err(error) => tracing::warn!(%error, "couldn't keep the database key"),
-    }
-    Ok(started)
-}
-
 fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
@@ -164,6 +147,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-b", views::composer::FormatSpoiler, Some("Composer")),
         KeyBinding::new("cmd-shift-y", views::composer::RecordVoice, Some("Composer")),
     ]);
+    // The app's accounts (Cmd-1 to 9 are Desktop's, for chats).
+    cx.bind_keys((1..=9).map(|n| KeyBinding::new(&format!("ctrl-cmd-{n}"), SwitchAccount(n - 1), None)));
 
     menus::bind_keys(cx);
     shortcuts::bind_keys(cx);
@@ -195,7 +180,31 @@ fn main() -> Result<()> {
     std::thread::spawn(signal_emoji::warm_up);
 
     let window_dir = data_dir.clone();
-    let (backend, mut events) = start_backend(data_dir, key_store, moved_from)?;
+    // The real data directory's account moves into `accounts/` once, which
+    // can't be done under a Vernam still running with it (a build from
+    // before there were several). Development profiles aren't checked.
+    let refused = std::cell::Cell::new(false);
+    let running = || {
+        refused.set(key_store == keys::KeyStore::System && other_vernam_running());
+        refused.get()
+    };
+    let registry = accounts::adopt_layout(&data_dir, running).inspect_err(|_| {
+        if !refused.get() {
+            return;
+        }
+        former_name::alert(
+            "Quit Vernam to open this version",
+            "This version keeps each account's data in a folder of its own and moves your chats there the first time it \
+             opens, which it can't do while another Vernam is running. Quit it, then open Vernam again.",
+        )
+    })?;
+    let launch = accounts::Launch {
+        root: data_dir,
+        key_store,
+        device_name: device_name(),
+        demo: std::env::var_os("SIGNAL_GPUI_DEMO").is_some(),
+        call_lines: Default::default(),
+    };
 
     // Links macOS opens us with (`sgnl://`, registered in the bundle's
     // Info.plist by scripts/bundle.sh), handed to the app once it runs.
@@ -215,28 +224,41 @@ fn main() -> Result<()> {
         bind_keys(cx);
         menus::install(cx);
 
-        let wake_backend = backend.clone();
-        power::on_wake(move || wake_backend.send(signal_backend::Command::Resumed));
-        let state = state::new_state(backend, cx);
+        let accounts = match accounts::Accounts::start(launch, registry, moved_from, cx) {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                tracing::error!("failed to open the accounts: {error:#}");
+                cx.quit();
+                return;
+            }
+        };
+        let running = accounts.read(cx).running();
+        power::on_wake(move || {
+            for backend in running.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+                backend.send(signal_backend::Command::Resumed);
+            }
+        });
         cx.on_action(|_: &Quit, cx| main_window::quit(cx));
         // However the app quits (the menu, the Dock, logging out), the
         // databases close first.
-        let quit_state = state.clone();
+        let quit_accounts = accounts.clone();
         cx.on_app_quit(move |cx| {
-            let state = quit_state.read(cx);
-            // A call still up (the Dock's Quit doesn't ask) is hung up.
-            if state.call.is_some() {
-                state.send(signal_backend::Command::HangUp);
-            }
-            state.backend.shutdown();
+            quit_accounts.read(cx).shut_down(cx);
             async {}
         })
         .detach();
+        let add_accounts = accounts.clone();
+        cx.on_action(move |_: &AddAccount, cx| {
+            main_window::show(cx);
+            add_accounts.update(cx, |accounts, cx| accounts.add_account(cx));
+        });
+        let switch_accounts = accounts.clone();
+        cx.on_action(move |switch: &SwitchAccount, cx| switch_accounts.update(cx, |accounts, cx| accounts.activate(switch.0, cx)));
 
         // Desktop's File → Create/upload sticker pack: its own window. It
-        // uploads as this account, so only once one is linked.
-        let creator_state = state.clone();
+        // uploads as the account shown, so only once that one is linked.
         cx.on_action(move |_: &CreateStickerPack, cx| {
+            let Some(creator_state) = accounts::active_state(cx) else { return };
             if creator_state.read(cx).account.is_some() {
                 views::sticker_creator::open(creator_state.clone(), cx);
             } else if let Some(window) = cx.windows().first() {
@@ -252,23 +274,15 @@ fn main() -> Result<()> {
             }
         });
 
-        // Pump backend events into the model on the UI thread.
-        let pump_state = state.clone();
-        cx.spawn(async move |cx| {
-            while let Some(event) = events.next().await {
-                pump_state.update(cx, |state, cx| state.handle(event, cx));
-            }
-        })
-        .detach();
-
         // Desktop's `open-url` (app/main.main.ts): the window comes forward
-        // and the link opens.
-        let link_state = state.clone();
+        // and the link opens, in the account it shows.
         cx.spawn(async move |cx| {
             while let Some(url) = links.next().await {
                 cx.update(|cx| {
                     main_window::show(cx);
-                    link_state.update(cx, |state, cx| state.open_link_from_system(url, cx));
+                    if let Some(state) = accounts::active_state(cx) {
+                        state.update(cx, |state, cx| state.open_link_from_system(url, cx));
+                    }
                 });
             }
         })
@@ -277,7 +291,7 @@ fn main() -> Result<()> {
         // Opens without taking focus from whatever you're typing in (for
         // screenshots and scripted runs).
         let background = std::env::var_os("SIGNAL_GPUI_BACKGROUND").is_some();
-        if let Err(e) = main_window::open(state.clone(), window_dir.clone(), background, cx) {
+        if let Err(e) = main_window::open(accounts, window_dir.clone(), background, cx) {
             tracing::error!("failed to open window: {e:#}");
             cx.quit();
         }
