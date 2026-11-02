@@ -2941,6 +2941,7 @@ impl ConversationView {
         let view = cx.entity().downgrade();
         let opened = cx.entity().downgrade();
         Button::new(SharedString::from(format!("menu-{id}")))
+            .debug_selector(move || format!("menu-{id}"))
             .ghost()
             .small()
             .icon(IconName::Ellipsis)
@@ -4965,9 +4966,9 @@ impl Render for ConversationView {
             .children(self.render_mini_player(palette, cx))
             .children(self.render_pins(palette, cx))
             .child(
-                // The reaction picker sits beside the timeline, not in it:
-                // inside, the timeline's Space (open the targeted message)
-                // would take the spaces typed in its search.
+                // The reaction picker sits beside the timeline, not in it,
+                // so it's out of the timeline's key context (`timeline_key`
+                // also leaves keys alone while anything inside has focus).
                 div()
                     .relative()
                     .flex_1()
@@ -4979,13 +4980,15 @@ impl Render for ConversationView {
                             .size_full()
                             .key_context(crate::shortcuts::TIMELINE)
                             .track_focus(&self.timeline_focus)
-                            .on_action(cx.listener(|this, _: &timeline::SelectPrevious, window, cx| this.move_target(-1, window, cx)))
-                            .on_action(cx.listener(|this, _: &timeline::SelectNext, window, cx| this.move_target(1, window, cx)))
-                            .on_action(cx.listener(|this, _: &timeline::PreviousPage, window, cx| this.page_target(true, window, cx)))
-                            .on_action(cx.listener(|this, _: &timeline::NextPage, window, cx| this.page_target(false, window, cx)))
-                            .on_action(cx.listener(|this, _: &timeline::SelectFirst, window, cx| this.target_first(window, cx)))
-                            .on_action(cx.listener(|this, _: &timeline::SelectLast, window, cx| this.target_last(window, cx)))
-                            .on_action(cx.listener(|this, _: &timeline::OpenSelected, window, cx| this.open_targeted(window, cx)))
+                            .on_action(Self::timeline_key(cx, |this: &mut Self, _: &timeline::SelectPrevious, window, cx| this.move_target(-1, window, cx)))
+                            .on_action(Self::timeline_key(cx, |this: &mut Self, _: &timeline::SelectNext, window, cx| this.move_target(1, window, cx)))
+                            .on_action(Self::timeline_key(cx, |this: &mut Self, _: &timeline::PreviousPage, window, cx| this.page_target(true, window, cx)))
+                            .on_action(Self::timeline_key(cx, |this: &mut Self, _: &timeline::NextPage, window, cx| this.page_target(false, window, cx)))
+                            .on_action(Self::timeline_key(cx, |this: &mut Self, _: &timeline::SelectFirst, window, cx| this.target_first(window, cx)))
+                            .on_action(Self::timeline_key(cx, |this: &mut Self, _: &timeline::SelectLast, window, cx| this.target_last(window, cx)))
+                            .on_action(Self::timeline_key(cx, |this: &mut Self, _: &timeline::OpenSelected, window, cx| this.open_targeted(window, cx)))
+                            // Escape always leaves; a menu inside that closes on it binds
+                            // its own, which comes first.
                             .on_action(cx.listener(|this, _: &timeline::LeaveTimeline, window, cx| this.leave_timeline(window, cx)))
                             .when(self.messages.is_empty() && !self.has_more, |d| d.children(self.render_hero(cx)))
                             .child(
@@ -5702,6 +5705,22 @@ impl ConversationView {
         let handle = self.composer.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
+    }
+
+    /// A timeline key's handler, for when the timeline itself has the
+    /// keyboard. Anything focused inside it (a message's "⋯" menu, say)
+    /// gets the key instead: Space there mustn't open the message behind.
+    fn timeline_key<A: gpui_kit::Action>(
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Self, &A, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&A, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, action: &A, window, cx| {
+            if this.timeline_focus.is_focused(window) {
+                f(this, action, window, cx);
+            } else {
+                cx.propagate();
+            }
+        })
     }
 
     /// Enter or Space on the targeted message: Desktop's `#handleOpen`. A
@@ -8143,6 +8162,53 @@ mod tests {
         assert_eq!(picker.read_with(cx, |p, _| p.query().to_owned()), "thumbs up");
         assert_eq!(opened.get(), 0, "the photo didn't open");
         assert!(cx.update(|window, cx| picker.read(cx).focus_handle(cx).is_focused(window)), "the search kept focus");
+        backend.shutdown();
+    }
+
+    #[gpui_kit::test]
+    fn timeline_keys_leave_a_messages_menu_alone(cx: &mut TestAppContext) {
+        let (backend, _dir) = demo_backend(cx);
+        let photos = wait_for_messages(&backend, NOTE_TO_SELF, 3, |m| !m.attachments.is_empty());
+        cx.update(crate::shortcuts::bind_keys);
+        let (mut cx, view) = open_view(cx, &backend, NOTE_TO_SELF);
+        let cx = &mut cx;
+        let opened = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let opened = opened.clone();
+            let state = view.read(cx).state.clone();
+            cx.subscribe(&state, move |_, event: &AppEvent, _| {
+                if let AppEvent::ViewImage(_) = event {
+                    opened.set(opened.get() + 1);
+                }
+            })
+            .detach();
+        });
+        let id = photos[0].id;
+        let row = bounds(cx, format!("row-{id}"));
+        cx.simulate_click(row.origin + gpui_kit::point(px(8.), px(8.)), gpui_kit::Modifiers::none());
+        assert_eq!(view.read_with(cx, |v, _| v.targeted), Some(id));
+        // Open the photo's "⋯" menu (its hover buttons shown).
+        view.update(cx, |v, cx| {
+            v.hovered = Some(id);
+            cx.notify();
+        });
+        let menu = bounds(cx, format!("menu-{id}"));
+        cx.simulate_click(menu.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.menu_open_for), Some(id));
+        assert!(!view.read_with(cx, |v, _| v.timeline_focused), "the menu has the keyboard");
+
+        cx.simulate_keystrokes("space home");
+        assert_eq!(opened.get(), 0, "Space didn't open the photo behind the menu");
+        assert_eq!(view.read_with(cx, |v, _| v.targeted), Some(id), "Home didn't move the target");
+
+        // Closed, the timeline has the keys again.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(view.read_with(cx, |v, _| v.menu_open_for), None);
+        let last = view.read_with(cx, |v, _| v.messages.last().map(|m| m.id));
+        assert_ne!(last, Some(id));
+        cx.simulate_keystrokes("end");
+        assert_eq!(view.read_with(cx, |v, _| v.targeted), last);
         backend.shutdown();
     }
 
