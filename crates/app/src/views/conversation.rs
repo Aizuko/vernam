@@ -3120,6 +3120,7 @@ impl ConversationView {
             .child(appear(
                 div()
                     .id("more-reactions")
+                    .debug_selector(|| "more-reactions".into())
                     .size(px(36.))
                     .flex()
                     .items_center()
@@ -4964,38 +4965,46 @@ impl Render for ConversationView {
             .children(self.render_mini_player(palette, cx))
             .children(self.render_pins(palette, cx))
             .child(
+                // The reaction picker sits beside the timeline, not in it:
+                // inside, the timeline's Space (open the targeted message)
+                // would take the spaces typed in its search.
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .key_context(crate::shortcuts::TIMELINE)
-                    .track_focus(&self.timeline_focus)
-                    .on_action(cx.listener(|this, _: &timeline::SelectPrevious, window, cx| this.move_target(-1, window, cx)))
-                    .on_action(cx.listener(|this, _: &timeline::SelectNext, window, cx| this.move_target(1, window, cx)))
-                    .on_action(cx.listener(|this, _: &timeline::PreviousPage, window, cx| this.page_target(true, window, cx)))
-                    .on_action(cx.listener(|this, _: &timeline::NextPage, window, cx| this.page_target(false, window, cx)))
-                    .on_action(cx.listener(|this, _: &timeline::SelectFirst, window, cx| this.target_first(window, cx)))
-                    .on_action(cx.listener(|this, _: &timeline::SelectLast, window, cx| this.target_last(window, cx)))
-                    .on_action(cx.listener(|this, _: &timeline::OpenSelected, window, cx| this.open_targeted(window, cx)))
-                    .on_action(cx.listener(|this, _: &timeline::LeaveTimeline, window, cx| this.leave_timeline(window, cx)))
                     .image_cache(self.image_cache.clone())
-                    .when(self.messages.is_empty() && !self.has_more, |d| d.children(self.render_hero(cx)))
                     .child(
-                        list(self.list.clone(), move |ix, _window, cx| {
-                            entity.update(cx, |this, cx| {
-                                let palette = Palette::get(cx);
-                                this.render_item(ix, palette, cx)
-                            })
-                        })
-                        .size_full(),
+                        div()
+                            .relative()
+                            .size_full()
+                            .key_context(crate::shortcuts::TIMELINE)
+                            .track_focus(&self.timeline_focus)
+                            .on_action(cx.listener(|this, _: &timeline::SelectPrevious, window, cx| this.move_target(-1, window, cx)))
+                            .on_action(cx.listener(|this, _: &timeline::SelectNext, window, cx| this.move_target(1, window, cx)))
+                            .on_action(cx.listener(|this, _: &timeline::PreviousPage, window, cx| this.page_target(true, window, cx)))
+                            .on_action(cx.listener(|this, _: &timeline::NextPage, window, cx| this.page_target(false, window, cx)))
+                            .on_action(cx.listener(|this, _: &timeline::SelectFirst, window, cx| this.target_first(window, cx)))
+                            .on_action(cx.listener(|this, _: &timeline::SelectLast, window, cx| this.target_last(window, cx)))
+                            .on_action(cx.listener(|this, _: &timeline::OpenSelected, window, cx| this.open_targeted(window, cx)))
+                            .on_action(cx.listener(|this, _: &timeline::LeaveTimeline, window, cx| this.leave_timeline(window, cx)))
+                            .when(self.messages.is_empty() && !self.has_more, |d| d.children(self.render_hero(cx)))
+                            .child(
+                                list(self.list.clone(), move |ix, _window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        let palette = Palette::get(cx);
+                                        this.render_item(ix, palette, cx)
+                                    })
+                                })
+                                .size_full(),
+                            )
+                            .child(self.render_caught_up_check(cx))
+                            .child(
+                                gpui_kit::component::scroll::Scrollbar::vertical(&self.scrollbar)
+                                    .mode(gpui_kit::component::scroll::ScrollbarMode::Hover),
+                            )
+                            .children(self.render_floating_date(palette))
+                            .when(scrolled_up, |d| d.child(self.render_scroll_down_buttons(palette, cx)))
                     )
-                    .child(self.render_caught_up_check(cx))
-                    .child(
-                        gpui_kit::component::scroll::Scrollbar::vertical(&self.scrollbar)
-                            .mode(gpui_kit::component::scroll::ScrollbarMode::Hover),
-                    )
-                    .children(self.render_floating_date(palette))
-                    .when(scrolled_up, |d| d.child(self.render_scroll_down_buttons(palette, cx)))
                     .when(self.reaction_picker_for.is_some(), |d| {
                         d.child(deferred(
                             div()
@@ -8089,6 +8098,51 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert_eq!(targeted(cx), None);
         assert!(cx.update(|window, cx| view.read(cx).composer.read(cx).focus_handle(cx).is_focused(window)));
+        backend.shutdown();
+    }
+
+    #[gpui_kit::test]
+    fn space_in_the_reaction_pickers_search_types_a_space(cx: &mut TestAppContext) {
+        let (backend, _dir) = demo_backend(cx);
+        let photos = wait_for_messages(&backend, NOTE_TO_SELF, 3, |m| !m.attachments.is_empty());
+        cx.update(crate::shortcuts::bind_keys);
+        let (mut cx, view) = open_view(cx, &backend, NOTE_TO_SELF);
+        let cx = &mut cx;
+        let opened = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let opened = opened.clone();
+            let state = view.read(cx).state.clone();
+            cx.subscribe(&state, move |_, event: &AppEvent, _| {
+                if let AppEvent::ViewImage(_) = event {
+                    opened.set(opened.get() + 1);
+                }
+            })
+            .detach();
+        });
+        // Target a photo, where Space in the timeline would open it.
+        let row = bounds(cx, format!("row-{}", photos[0].id));
+        cx.simulate_click(row.origin + gpui_kit::point(px(8.), px(8.)), gpui_kit::Modifiers::none());
+        assert_eq!(view.read_with(cx, |v, _| v.targeted), Some(photos[0].id));
+        // Open the reaction picker from the reaction bar's "more" button.
+        cx.update(|_, cx| view.update(cx, |v, cx| v.toggle_reactions_for_targeted(cx)));
+        // Its buttons rise into place; click once they're there.
+        bounds(cx, "more-reactions".into());
+        let settle = std::time::Instant::now();
+        while settle.elapsed() < std::time::Duration::from_millis(REACTION_APPEAR_MS + REACTION_STAGGER_MS * 10 + 100) {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let more = bounds(cx, "more-reactions".into());
+        cx.simulate_click(more.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.reaction_picker_for), Some(photos[0].id));
+
+        cx.simulate_keystrokes("t h u m b s space u p");
+        let picker = view.read_with(cx, |v, _| v.picker.clone());
+        assert_eq!(picker.read_with(cx, |p, _| p.query().to_owned()), "thumbs up");
+        assert_eq!(opened.get(), 0, "the photo didn't open");
+        assert!(cx.update(|window, cx| picker.read(cx).focus_handle(cx).is_focused(window)), "the search kept focus");
         backend.shutdown();
     }
 

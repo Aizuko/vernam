@@ -522,6 +522,11 @@ impl EmojiPicker {
         self.skin_tone
     }
 
+    #[cfg(test)]
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
     pub fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.update(cx, |s, cx| s.set_value("", window, cx));
         self.query.clear();
