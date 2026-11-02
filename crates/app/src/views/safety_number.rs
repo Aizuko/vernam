@@ -99,7 +99,7 @@ pub fn open(state: Entity<AppState>, conversation: ConversationId, name: String,
     });
     // Desktop's `toggleSafetyNumberModal`: the introduction, once.
     let s = introduce.read(cx);
-    if signal_backend::key_transparency_on() && !s.key_transparency_disabled && !s.kt_onboarding_seen {
+    if signal_backend::key_transparency_on(&s.remote_config()) && !s.key_transparency_disabled && !s.kt_onboarding_seen {
         onboarding(introduce, window, cx);
     }
 }
@@ -371,7 +371,7 @@ mod tests {
         // The demo backend answers from its own Tokio threads.
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new() };
+        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new(), call_lines: Default::default() };
         let (backend, mut events) = Backend::start(config).unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
         cx.update(|cx| {

@@ -134,6 +134,7 @@ fn start_backend(
             keys::KeyStore::System => former_name::former_data_dirs(),
             keys::KeyStore::File => Vec::new(),
         },
+        call_lines: Default::default(),
     })?;
     // The key opened the data: kept as Vernam's, after which where moved-in
     // data came from is done with. If keeping it fails, the next launch

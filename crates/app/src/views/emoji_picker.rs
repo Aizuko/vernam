@@ -911,6 +911,7 @@ mod tests {
             device_name: "test".into(),
             demo: true,
             former_data_dirs: Vec::new(),
+            call_lines: Default::default(),
         })
         .unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
@@ -982,6 +983,7 @@ mod tests {
             device_name: "test".into(),
             demo: true,
             former_data_dirs: Vec::new(),
+            call_lines: Default::default(),
         })
         .unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));

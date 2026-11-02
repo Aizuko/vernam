@@ -45,7 +45,8 @@ pub mod routes;
 pub mod server_alerts;
 mod sender_keys;
 
-pub use remote_config::{RemoteConfig, current as remote_config};
+pub use remote_config::{ConfigCell, RemoteConfig};
+pub(crate) use remote_config::current as remote_config;
 
 /// Settings key: `"true"` when read receipts are on: sent, and others'
 /// shown. See [`AccountSetting`] for where it comes from and its default.
@@ -243,8 +244,8 @@ pub const SETTING_KEY_TRANSPARENCY_DISABLED: &str = key_transparency::SETTING_DI
 pub const SETTING_KEY_TRANSPARENCY_ONBOARDING_SEEN: &str = key_transparency::SETTING_ONBOARDING_SEEN;
 /// Whether key transparency is on at all (Desktop's remote config flag
 /// `desktop.keyTransparency.prod`).
-pub fn key_transparency_on() -> bool {
-    key_transparency::feature_on()
+pub fn key_transparency_on(config: &RemoteConfig) -> bool {
+    key_transparency::feature_on(config)
 }
 
 /// TLS for Signal's own servers (the calling server, updates2.signal.org),
@@ -280,6 +281,32 @@ pub struct Config {
     /// paths stored for files in each are rewritten once to name
     /// `data_dir` instead.
     pub former_data_dirs: Vec<PathBuf>,
+    /// Every account's calls, shared by their backends: while one is in a
+    /// call, the others turn calls away as busy.
+    pub call_lines: CallLines,
+}
+
+/// Which accounts (by data directory) are in a call. RingRTC answers a
+/// call with "busy" during another only within one account's backend;
+/// this extends that to the app's other accounts.
+#[derive(Debug, Clone, Default)]
+pub struct CallLines(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>);
+
+impl CallLines {
+    /// Notes whether `line`'s account is in a call (or calling).
+    pub(crate) fn set(&self, line: &std::path::Path, busy: bool) {
+        let mut lines = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if busy {
+            lines.insert(line.to_owned());
+        } else {
+            lines.remove(line);
+        }
+    }
+
+    /// Whether an account other than `line`'s is in a call.
+    pub(crate) fn busy_elsewhere(&self, line: &std::path::Path) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|other| other != line)
+    }
 }
 
 /// A group a link leads to, as Desktop's `GroupV2JoinDialog` shows it.
@@ -628,6 +655,9 @@ pub enum Command {
     ClearCallHistory,
     /// Unlinks this device and wipes local state.
     Unlink,
+    /// Stops the backend for good (an account removed from the app): no
+    /// command is taken after it. Its thread ends with what it was doing.
+    Stop,
     /// Stops waiting for the history transfer and continues without it.
     /// Ignored once the import has started.
     SkipHistory,
@@ -728,8 +758,8 @@ pub const SETTING_HIDDEN_STORIES: &str = signal_store::HIDDEN_STORIES;
 /// `CompositionArea`): groups, and 1:1 chats when the remote config's
 /// `pollSend1to1` flag is on ([`RemoteConfig::poll_send_1to1`]). Received
 /// polls show anywhere.
-pub fn can_create_poll(kind: signal_store::ConversationKind) -> bool {
-    kind == signal_store::ConversationKind::Group || remote_config().poll_send_1to1()
+pub fn can_create_poll(kind: signal_store::ConversationKind, config: &RemoteConfig) -> bool {
+    kind == signal_store::ConversationKind::Group || config.poll_send_1to1()
 }
 
 /// The history transfer after linking, as shown while it runs.
@@ -1010,8 +1040,8 @@ pub const VOICE_CONTENT_TYPE: &str = "audio/aac";
 
 /// Whether `len` bytes are over Signal's attachment size limit
 /// (`global.attachments.maxBytes`, see [`RemoteConfig::attachment_max_bytes`]).
-pub fn too_big_to_send(len: usize) -> bool {
-    len as u64 > remote_config().attachment_max_bytes()
+pub fn too_big_to_send(len: usize, config: &RemoteConfig) -> bool {
+    len as u64 > config.attachment_max_bytes()
 }
 
 /// A size limit as Desktop shows it (`getRenderDetailsForLimit` in
@@ -1317,12 +1347,20 @@ pub struct Backend {
     commands: mpsc::UnboundedSender<Command>,
     runtime: tokio::runtime::Handle,
     data_dir: std::path::PathBuf,
+    remote_config: remote_config::ConfigCell,
+    /// Set once the backend thread is done (see [`Backend::stop`]).
+    finished: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
 impl Backend {
     /// Where the databases, attachments and logs live.
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// This account's remote config in effect.
+    pub fn remote_config(&self) -> std::sync::Arc<RemoteConfig> {
+        self.remote_config.get()
     }
 
     /// Opens the databases, starts the runtime thread, and begins connecting
@@ -1365,7 +1403,11 @@ impl Backend {
             commands,
             runtime: runtime.handle().clone(),
             data_dir: config.data_dir.clone(),
+            remote_config: remote_config::ConfigCell::default(),
+            finished: Default::default(),
         };
+        let config_cell = backend.remote_config.clone();
+        let finished = backend.finished.clone();
 
         std::thread::Builder::new()
             .name("signal-backend".into())
@@ -1377,11 +1419,17 @@ impl Backend {
                 // presage's futures are !Send, so the actor lives on a LocalSet
                 // pinned to this thread; `Backend::spawn` work goes to the workers.
                 let local = tokio::task::LocalSet::new();
+                remote_config::install(config_cell);
                 if config.demo {
                     runtime.block_on(local.run_until(demo::run(db, config.data_dir.clone(), command_rx, event_tx)));
                 } else {
                     runtime.block_on(local.run_until(actor::run(config, db, video, command_rx, event_tx)));
                 }
+                // Its tasks go with it.
+                drop(local);
+                let (done, ended) = &*finished;
+                *done.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                ended.notify_all();
                 // `Backend::spawn` and `shutdown` use this runtime's handle
                 // even if the actor stopped early (signal.db failed to open,
                 // say): never shut it down.
@@ -1408,6 +1456,24 @@ impl Backend {
     /// The call's video frames.
     pub fn call_video(&self) -> &CallVideo {
         &self.video
+    }
+
+    /// Stops the backend (see [`Command::Stop`], taken after the commands
+    /// before it), waits up to `wait` for its thread to finish what it was
+    /// doing (so nothing writes in its data directory after), and closes
+    /// its database. Returns whether the thread finished. Call from a
+    /// non-runtime thread.
+    pub fn stop(&self, wait: std::time::Duration) -> bool {
+        self.send(Command::Stop);
+        let (done, ended) = &*self.finished;
+        let guard = done.lock().unwrap_or_else(|e| e.into_inner());
+        let (guard, _) = ended
+            .wait_timeout_while(guard, wait, |done| !*done)
+            .unwrap_or_else(|e| e.into_inner());
+        let finished = *guard;
+        drop(guard);
+        self.shutdown();
+        finished
     }
 
     pub fn send(&self, command: Command) {
@@ -1447,5 +1513,22 @@ async fn rebase_paths(db: &AppDb, former: &std::path::Path, data_dir: &std::path
             }
         }
         Err(error) => tracing::warn!(%error, "couldn't rewrite stored file paths from {from}"),
+    }
+}
+
+#[cfg(test)]
+mod call_line_tests {
+    use super::CallLines;
+
+    #[test]
+    fn an_account_is_busy_while_another_is_in_a_call() {
+        let lines = CallLines::default();
+        let (a, b) = (std::path::Path::new("/a"), std::path::Path::new("/b"));
+        assert!(!lines.busy_elsewhere(a) && !lines.busy_elsewhere(b));
+        lines.set(a, true);
+        assert!(lines.busy_elsewhere(b), "a's call");
+        assert!(!lines.busy_elsewhere(a), "its own call is RingRTC's to handle");
+        lines.set(a, false);
+        assert!(!lines.busy_elsewhere(b));
     }
 }

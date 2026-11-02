@@ -5,8 +5,6 @@
 //! always download, other audio is audio, the rest documents; and nothing
 //! at or over the remote config's limit downloads on its own.
 
-use std::sync::{Arc, RwLock};
-
 use signal_store::AttachmentMeta;
 
 /// Settings key: the choices, as JSON.
@@ -63,17 +61,19 @@ impl AutoDownload {
     }
 }
 
-static CURRENT: RwLock<Option<Arc<AutoDownload>>> = RwLock::new(None);
+thread_local! {
+    /// The choices of the account whose backend thread this is (each
+    /// account has its own; all its actor work runs on that thread).
+    static CURRENT: std::cell::Cell<Option<AutoDownload>> = const { std::cell::Cell::new(None) };
+}
 
-/// The choices in effect.
+/// The choices in effect for this thread's account.
 pub fn current() -> AutoDownload {
-    CURRENT.read().ok().and_then(|c| c.as_deref().copied()).unwrap_or_default()
+    CURRENT.with(|current| current.get()).unwrap_or_default()
 }
 
 pub(crate) fn set_current(choices: AutoDownload) {
-    if let Ok(mut current) = CURRENT.write() {
-        *current = Some(Arc::new(choices));
-    }
+    CURRENT.with(|current| current.set(Some(choices)));
 }
 
 /// Puts the saved choices in effect.

@@ -915,6 +915,9 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
     let call: std::rc::Rc<std::cell::RefCell<Option<(crate::CallUpdate, i64, bool)>>> = Default::default();
 
     while let Some(command) = commands.next().await {
+        if command == Command::Stop {
+            break;
+        }
         if crate::demo_groups::handle(&db, &data_dir, &command, &emit).await {
             continue;
         }
@@ -2299,6 +2302,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
             | Command::FetchAttachments { .. }
             | Command::FetchLongText { .. }
             | Command::Unlink
+            | Command::Stop
             | Command::SkipHistory
             | Command::RefreshRemoteConfig
             | Command::Resumed => {}
@@ -2478,7 +2482,7 @@ fn demo_safety_number(conversation: &ConversationId, verified: bool, auto_verify
 /// As the real backend decides it: off by the remote config or in
 /// Settings, or whether we have their number.
 async fn demo_auto_verify(db: &AppDb, conversation: &ConversationId) -> crate::AutoVerify {
-    if !crate::key_transparency::feature_on()
+    if !crate::key_transparency::feature_on(&crate::remote_config())
         || db.setting(crate::SETTING_KEY_TRANSPARENCY_DISABLED).await.ok().flatten().as_deref() == Some("true") {
         return crate::AutoVerify::Off;
     }

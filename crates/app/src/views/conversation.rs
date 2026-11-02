@@ -2447,9 +2447,10 @@ impl ConversationView {
         // Like Signal Desktop, a downloaded photo fills the bubble edge to edge
         // and sets its width, and two or more photos and videos make its grid;
         // a caption wraps below either.
+        let max_receive = self.state.read(cx).remote_config().attachment_max_receive_bytes();
         let grid = !message.deleted
             && message.attachments.len() > 1
-            && message.attachments.iter().all(|a| is_visual(a) && !too_big(a));
+            && message.attachments.iter().all(|a| is_visual(a) && !too_big(a, max_receive));
         let photo = (!message.deleted && !grid)
             .then(|| message.attachments.first())
             .flatten()
@@ -2579,10 +2580,10 @@ impl ConversationView {
                             .px_3()
                             .pt_1p5()
                             .pb_2()
-                            .children(rest.iter().enumerate().filter(|(_, a)| !too_big(a)).map(|(ix, a)| {
+                            .children(rest.iter().enumerate().filter(|(_, a)| !too_big(a, max_receive)).map(|(ix, a)| {
                                 render_attachment(message.id, ix + 1, a, &title, fg, palette, &self.state, cx)
                             }))
-                            .children(too_big_label(message))
+                            .children(too_big_label(message, max_receive))
                             .when(caption, |d| d.child(message_text(message, fg, self.revealed_spoilers.contains(&message.id), self.display_limits.get(&message.id).copied(), spacer.as_deref().map(|s| (s, bg)), cx)))
                             .when_some(meta, |d, m| d.child(place_meta(m, inline_meta))),
                     )
@@ -2666,10 +2667,10 @@ impl ConversationView {
                     .attachments
                     .iter()
                     .enumerate()
-                    .filter(|(_, a)| !too_big(a))
+                    .filter(|(_, a)| !too_big(a, max_receive))
                     .map(|(ix, a)| render_attachment(message.id, ix, a, &title, fg, palette, &self.state, cx)),
             )
-            .children((!message.deleted).then(|| too_big_label(message)).flatten())
+            .children((!message.deleted).then(|| too_big_label(message, max_receive)).flatten())
             .map(|d| {
                 if message.deleted {
                     d.child(div().italic().child(self.deleted_text(message, cx)))
@@ -3026,7 +3027,7 @@ impl ConversationView {
         let we_are_admin = state
             .conversation(&self.id)
             .is_some_and(|c| !c.left && me.is_some_and(|me| c.admins.iter().any(|a| a == me)));
-        signal_backend::deletes::Chat::new(self.note_to_self(cx), self.id.as_group().is_some(), we_are_admin, self.ended(cx))
+        signal_backend::deletes::Chat::new(self.note_to_self(cx), self.id.as_group().is_some(), we_are_admin, self.ended(cx), &state.remote_config())
     }
 
     /// An admin ended this group (Desktop's `terminated`): no sends,
@@ -5334,7 +5335,7 @@ fn open_pin_dialog(state: Entity<AppState>, message_id: i64, pinned: usize, disa
                     .child(Button::new("pin-confirm").label("Pin").primary().on_click(move |_, window, cx| {
                         let duration = CHOICES[*confirm.read(cx)].1;
                         window.close_all_dialogs(cx);
-                        if pinned < signal_backend::remote_config().pinned_message_limit() {
+                        if pinned < state.read(cx).remote_config().pinned_message_limit() {
                             state.read(cx).send(Command::PinMessage { message_id, duration });
                             return;
                         }
@@ -5359,24 +5360,25 @@ fn open_pin_dialog(state: Entity<AppState>, message_id: i64, pinned: usize, disa
 
 /// An attachment over Signal's receive limit, which isn't downloaded or
 /// shown (Desktop's `wasTooBig`, `ts/jobs/AttachmentDownloadManager.preload.ts`).
-fn too_big(attachment: &AttachmentMeta) -> bool {
-    attachment.local_path.is_none() && attachment.size > signal_backend::remote_config().attachment_max_receive_bytes()
+/// `max`: the account's limit (`attachment_max_receive_bytes`).
+fn too_big(attachment: &AttachmentMeta, max: u64) -> bool {
+    attachment.local_path.is_none() && attachment.size > max
 }
 
 /// What stands in for attachments too big to receive, in Desktop's words
 /// (`renderAttachmentTooBig` in `ts/components/conversation/Message.dom.tsx`).
-fn too_big_text(message: &Message) -> Option<&'static str> {
-    if !message.attachments.iter().any(too_big) {
+fn too_big_text(message: &Message, max: u64) -> Option<&'static str> {
+    if !message.attachments.iter().any(|a| too_big(a, max)) {
         None
-    } else if message.attachments.iter().all(too_big) {
+    } else if message.attachments.iter().all(|a| too_big(a, max)) {
         Some("Attachment too large to display.")
     } else {
         Some("Some attachments are too large to display.")
     }
 }
 
-fn too_big_label(message: &Message) -> Option<AnyElement> {
-    let label = too_big_text(message)?;
+fn too_big_label(message: &Message, max: u64) -> Option<AnyElement> {
+    let label = too_big_text(message, max)?;
     let id = message.id;
     Some(div().debug_selector(move || format!("too-big-{id}")).italic().child(label).into_any_element())
 }
@@ -5708,7 +5710,7 @@ impl ConversationView {
             return;
         }
         let Some(first) = message.attachments.first() else { return };
-        if too_big(first) {
+        if too_big(first, self.state.read(cx).remote_config().attachment_max_receive_bytes()) {
             return;
         }
         let kind = &first.content_type;
@@ -5884,7 +5886,7 @@ mod tests {
     fn admin_deletes_confirm_unless_all_are_ours() {
         use signal_backend::deletes::Chat;
         let now = 10_000;
-        let admin = Chat { note_to_self: false, group: true, we_are_admin: true, admin_deletes: true, ended: false };
+        let admin = Chat { note_to_self: false, group: true, we_are_admin: true, admin_deletes: true, ended: false, ..Chat::default() };
         let theirs = message(3, now - 100);
         let ours = Message { direction: Direction::Outgoing, author: None, ..message(4, now - 100) };
         let everyone = |m: &[Message], chat| super::everyone_delete(m, chat, now);
@@ -5964,6 +5966,7 @@ mod tests {
             device_name: "test".into(),
             demo: true,
             former_data_dirs: Vec::new(),
+            call_lines: Default::default(),
         })
         .unwrap();
         (backend, dir)
@@ -6201,7 +6204,7 @@ mod tests {
             thumbnail_path: None,
             sticker_pack: None,
         };
-        let limit = signal_backend::remote_config().attachment_max_receive_bytes();
+        let limit = backend.remote_config().attachment_max_receive_bytes();
         let insert = |sent_at: i64, attachments: Vec<AttachmentMeta>| {
             let db = backend.db().clone();
             let message = signal_store::NewMessage {
@@ -6228,9 +6231,9 @@ mod tests {
             let db = backend.db().clone();
             futures::executor::block_on(backend.spawn(async move { db.message(id).await })).unwrap().unwrap()
         };
-        assert_eq!(too_big_text(&message(alone)), Some("Attachment too large to display."));
-        assert_eq!(too_big_text(&message(mixed)), Some("Some attachments are too large to display."));
-        assert_eq!(too_big_text(&message(fits)), None, "the limit itself is allowed");
+        assert_eq!(too_big_text(&message(alone), limit), Some("Attachment too large to display."));
+        assert_eq!(too_big_text(&message(mixed), limit), Some("Some attachments are too large to display."));
+        assert_eq!(too_big_text(&message(fits), limit), None, "the limit itself is allowed");
 
         let mut cx = open(cx, &backend, NOTE_TO_SELF);
         bounds(&mut cx, format!("too-big-{alone}"));

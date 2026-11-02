@@ -644,8 +644,13 @@ pub(crate) async fn run(
     }
 
     while let Some(command) = commands.next().await {
+        if command == Command::Stop {
+            break;
+        }
         actor.clone().handle(command);
     }
+    // Not in a call any more, for the app's other accounts.
+    actor.config.call_lines.set(&actor.config.data_dir, false);
     debug!("command channel closed; backend shutting down");
     if let Some(task) = actor.receiver.borrow_mut().take() {
         task.abort();
@@ -1084,6 +1089,8 @@ impl Actor {
                 Command::ApproveCallJoin { aci, approve } => self.approve_call_join(aci, approve),
                 Command::RemoveFromCall { demux_id } => self.remove_from_call(demux_id),
                 Command::Unlink => self.unlink().await,
+                // (Taken by `run` before it gets here.)
+                Command::Stop => {}
                 Command::SkipHistory => self.skip_history().await,
                 Command::AddGroupMembers { conversation, members } => self.add_group_members(conversation, members).await,
                 Command::EndGroup { conversation } => self.end_group(conversation).await,
@@ -1160,6 +1167,8 @@ impl Actor {
         // Any call ends with the account (RingRTC closes when dropped).
         self.call.borrow_mut().take();
         self.group_call.borrow_mut().take();
+        // Not busy any more, for the app's other accounts.
+        self.config.call_lines.set(&self.config.data_dir, false);
         let calls = self.calls.borrow_mut().take();
         drop(calls);
         if let Some(task) = self.receiver.borrow_mut().take() {
@@ -4007,7 +4016,7 @@ impl Actor {
                 Ok(Err(error)) => return self.error("can't send image", format!("{error:#}")),
                 Err(error) => return self.error("can't send image", error),
             };
-            if crate::too_big_to_send(bytes.len()) {
+            if crate::too_big_to_send(bytes.len(), &crate::remote_config()) {
                 let limit = crate::size_limit_label(crate::remote_config().attachment_max_bytes());
                 return self.error("can't send image", format!("larger than Signal's {limit} limit"));
             }
@@ -4081,7 +4090,7 @@ impl Actor {
         styles: Vec<signal_store::StyleSpan>,
         view_once: bool,
     ) {
-        if crate::too_big_to_send(file.bytes.len()) {
+        if crate::too_big_to_send(file.bytes.len(), &crate::remote_config()) {
             let limit = crate::size_limit_label(crate::remote_config().attachment_max_bytes());
             return self.error("can't send file", format!("larger than Signal's {limit} limit"));
         }
@@ -4327,6 +4336,7 @@ impl Actor {
             conversation.as_group().is_some(),
             !left && self.is_group_admin(conversation, &self.self_aci()).await,
             stored.as_ref().is_some_and(|c| c.ended),
+            &crate::remote_config(),
         );
         let Some(kind) = crate::deletes::send_kind(&target, chat, now_millis()) else {
             return self.error(
@@ -4364,6 +4374,7 @@ impl Actor {
             conversation.as_group().is_some(),
             !left && self.is_group_admin(conversation, &self.self_aci()).await,
             stored.as_ref().is_some_and(|c| c.ended),
+            &crate::remote_config(),
         );
         let Some(kind) = crate::deletes::retry_kind(&target, chat, now_millis()) else {
             return self.error("cannot retry the delete", "it was sent, or it's too late to delete for everyone");

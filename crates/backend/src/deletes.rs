@@ -16,12 +16,14 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// Extra time a delete may take to arrive.
 pub const RECEIVE_GRACE_MS: i64 = DAY_MS;
 
-/// How long after sending you can delete for everyone.
+/// How long after sending you can delete for everyone, as the backend
+/// thread's account has it.
 pub fn max_age_ms() -> i64 {
     crate::remote_config().normal_delete_max_age_ms()
 }
 
-/// How long after a message was sent a group admin can delete it.
+/// How long after a message was sent a group admin can delete it, as the
+/// backend thread's account has it.
 pub fn admin_max_age_ms() -> i64 {
     crate::remote_config().admin_delete_max_age_ms()
 }
@@ -38,7 +40,7 @@ pub enum Kind {
 }
 
 /// What the rules need to know about a message's chat.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chat {
     pub note_to_self: bool,
     pub group: bool,
@@ -50,12 +52,30 @@ pub struct Chat {
     /// An admin ended the group: no deletes for everyone in it (Desktop's
     /// `canDeleteForEveryone`, "terminated conversation").
     pub ended: bool,
+    /// The account's limits ([`max_age_ms`], [`admin_max_age_ms`]).
+    pub max_age_ms: i64,
+    pub admin_max_age_ms: i64,
+}
+
+impl Default for Chat {
+    fn default() -> Self {
+        Self::new(false, false, false, false, &crate::RemoteConfig::default())
+    }
 }
 
 impl Chat {
-    /// A chat's rules, with admin deletes as the remote config has them.
-    pub fn new(note_to_self: bool, group: bool, we_are_admin: bool, ended: bool) -> Self {
-        Self { note_to_self, group, we_are_admin, admin_deletes: crate::remote_config().admin_delete_send(), ended }
+    /// A chat's rules, with admin deletes and limits as the account's
+    /// remote config has them.
+    pub fn new(note_to_self: bool, group: bool, we_are_admin: bool, ended: bool, config: &crate::RemoteConfig) -> Self {
+        Self {
+            note_to_self,
+            group,
+            we_are_admin,
+            admin_deletes: config.admin_delete_send(),
+            ended,
+            max_age_ms: config.normal_delete_max_age_ms(),
+            admin_max_age_ms: config.admin_delete_max_age_ms(),
+        }
     }
 }
 
@@ -67,7 +87,7 @@ pub fn send_kind(message: &Message, chat: Chat, now: i64) -> Option<Kind> {
     if chat.ended {
         return None;
     }
-    if can_send(message, chat.note_to_self, now) {
+    if sendable(message, chat.note_to_self, now, chat.max_age_ms) {
         return Some(Kind::Normal);
     }
     if !chat.admin_deletes {
@@ -87,9 +107,9 @@ pub fn retry_kind(message: &Message, chat: Chat, now: i64) -> Option<Kind> {
     }
     let age = now - message.sent_at;
     if message.deleted_by_admin.is_some() {
-        return admin(chat.group, chat.we_are_admin, age, 0).ok().map(|()| Kind::Admin);
+        return admin(chat.group, chat.we_are_admin, age, chat.admin_max_age_ms).ok().map(|()| Kind::Admin);
     }
-    (message.direction == Direction::Outgoing && age.abs() <= max_age_ms()).then_some(Kind::Normal)
+    (message.direction == Direction::Outgoing && age.abs() <= chat.max_age_ms).then_some(Kind::Normal)
 }
 
 /// Whether we can delete `message` for everyone as a group admin at `now`,
@@ -104,7 +124,7 @@ pub fn can_send_as_admin(message: &Message, chat: Chat, now: i64) -> Result<(), 
     {
         return Err("not sent");
     }
-    admin(chat.group, chat.we_are_admin, now - message.sent_at, 0)
+    admin(chat.group, chat.we_are_admin, now - message.sent_at, chat.admin_max_age_ms)
 }
 
 /// Whether a group admin's delete sent at `deleted_at` applies to `target`,
@@ -112,7 +132,7 @@ pub fn can_send_as_admin(message: &Message, chat: Chat, now: i64) -> Result<(), 
 /// `isAdminDelete`). `sender_is_admin` is their role when it arrives.
 pub fn can_receive_as_admin(target: &Message, group: bool, sender_is_admin: bool, deleted_at: i64) -> Result<(), &'static str> {
     common(target)?;
-    admin(group, sender_is_admin, deleted_at - target.sent_at, RECEIVE_GRACE_MS)
+    admin(group, sender_is_admin, deleted_at - target.sent_at, admin_max_age_ms() + RECEIVE_GRACE_MS)
 }
 
 /// Desktop's `checkCommon`: not already deleted, and a message rather than
@@ -127,15 +147,15 @@ fn common(message: &Message) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Desktop's `canUseAdminDelete`.
-fn admin(group: bool, is_admin: bool, age: i64, grace: i64) -> Result<(), &'static str> {
+/// Desktop's `canUseAdminDelete`, within `max_age` (grace included).
+fn admin(group: bool, is_admin: bool, age: i64, max_age: i64) -> Result<(), &'static str> {
     if !group {
         return Err("not a group");
     }
     if !is_admin {
         return Err("not an admin");
     }
-    if age.abs() > admin_max_age_ms() + grace {
+    if age.abs() > max_age {
         return Err("too old");
     }
     Ok(())
@@ -144,11 +164,15 @@ fn admin(group: bool, is_admin: bool, age: i64, grace: i64) -> Result<(), &'stat
 /// Whether we can still delete our `message` for everyone at `now`.
 /// It must have actually gone out to someone.
 pub fn can_send(message: &Message, note_to_self: bool, now: i64) -> bool {
+    sendable(message, note_to_self, now, max_age_ms())
+}
+
+fn sendable(message: &Message, note_to_self: bool, now: i64, max_age: i64) -> bool {
     !note_to_self
         && message.direction == Direction::Outgoing
         && !message.deleted
         && matches!(message.status, DeliveryStatus::Sent | DeliveryStatus::Delivered | DeliveryStatus::Read)
-        && (now - message.sent_at).abs() <= max_age_ms()
+        && (now - message.sent_at).abs() <= max_age
 }
 
 /// Whether a delete sent at `deleted_at` by the target's author applies.
@@ -218,7 +242,15 @@ mod tests {
         assert!(!can_receive(&target, true, 1));
     }
 
-    const GROUP: Chat = Chat { note_to_self: false, group: true, we_are_admin: true, admin_deletes: true, ended: false };
+    const GROUP: Chat = Chat {
+        note_to_self: false,
+        group: true,
+        we_are_admin: true,
+        admin_deletes: true,
+        ended: false,
+        max_age_ms: DAY_MS,
+        admin_max_age_ms: DAY_MS,
+    };
 
     #[test]
     fn admins_delete_anyones_message_in_a_group() {

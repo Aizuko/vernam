@@ -185,7 +185,7 @@ pub fn open(state: Entity<AppState>, conversation: Conversation, window: &mut Wi
         let can_end = !conversation.left
             && !conversation.ended
             && conversation.admins.contains(&me)
-            && signal_backend::remote_config().group_terminate_send();
+            && state.read(cx).remote_config().group_terminate_send();
         let (end_state, end_chat) = (state.clone(), conversation.clone());
         let admin = crate::views::group_admin::we_are_admin(&conversation, &me);
         let in_group = !conversation.left && !conversation.ended;
@@ -272,7 +272,7 @@ pub fn open(state: Entity<AppState>, conversation: Conversation, window: &mut Wi
                 })
             })
             // Desktop's `isEditMemberLabelEnabled` (`groupMemberLabels.edit`).
-            .when(conversation.can_label && !conversation.left && signal_backend::remote_config().group_member_labels_edit(), |d| {
+            .when(conversation.can_label && !conversation.left && state.read(cx).remote_config().group_member_labels_edit(), |d| {
                 let (state, id, emoji, text) = (state.clone(), conversation.id.clone(), label_emoji.clone(), label_text.clone());
                 d.child(
                     div()

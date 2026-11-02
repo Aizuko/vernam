@@ -39,8 +39,8 @@ use signal_store::AppDb;
 /// Desktop's `keyTransparency` remote config flag
 /// (`desktop.keyTransparency.prod`, read as `isKeyTransparencyAvailable`
 /// reads it).
-pub fn feature_on() -> bool {
-    crate::remote_config().feature("keyTransparency")
+pub fn feature_on(config: &crate::RemoteConfig) -> bool {
+    config.feature("keyTransparency")
 }
 
 /// Settings key: `"true"` when automatic key verification is off (Desktop's
@@ -245,7 +245,7 @@ pub(crate) async fn is_disabled(db: &AppDb) -> bool {
 /// Desktop's `isKeyTransparencyAvailable`: the feature is on and the user
 /// hasn't turned it off.
 pub(crate) async fn is_available(db: &AppDb) -> bool {
-    feature_on() && !is_disabled(db).await
+    feature_on(&crate::remote_config()) && !is_disabled(db).await
 }
 
 /// Desktop's `KeyTransparency.disable`: forgets everything verified.

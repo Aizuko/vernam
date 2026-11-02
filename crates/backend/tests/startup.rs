@@ -12,6 +12,7 @@ fn fresh_install_needs_linking() {
         device_name: "test".into(),
         demo: false,
         former_data_dirs: Vec::new(),
+        call_lines: Default::default(),
     };
     let (backend, mut events) = Backend::start(config).unwrap();
     assert_eq!(block_on(events.next()), Some(Event::NeedsLinking));

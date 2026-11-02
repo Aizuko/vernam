@@ -54,7 +54,7 @@ pub(super) fn render(settings: &Entity<Settings>, palette: Palette, cx: &mut App
         palette,
         move |on, _, cx| sealed_state.update(cx, |s, cx| s.set_account_setting(AccountSetting::SealedSenderIndicators, on, cx)),
     )];
-    if signal_backend::key_transparency_on() {
+    if signal_backend::key_transparency_on(&state.read(cx).remote_config()) {
         let kt_state = state.clone();
         advanced.push(
             div()

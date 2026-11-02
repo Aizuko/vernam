@@ -212,6 +212,9 @@ impl Actor {
             Some(call) => Some(call.update()),
             None => self.group_call.borrow().as_ref().map(super::group_calls::GroupCall::update),
         };
+        // Every change to a call comes through here: the app's other
+        // accounts learn whether this one is busy.
+        self.config.call_lines.set(&self.config.data_dir, self.in_own_call());
         self.emit(Event::Call(update));
     }
 
@@ -383,6 +386,23 @@ impl Actor {
         self.send_call_message(peer, CallMessage { hangup: Some(hangup), ..Default::default() });
         let conversation = ConversationId::direct(peer);
         let notice = Notice::Call { incoming: true, video, outcome: CallOutcome::Missed, call_id: Some(call_id.as_u64() as i64), unseen: false };
+        match self.db.record_call(&conversation, at, &notice).await {
+            Ok(Some(id)) => self.emit(Event::MessageChanged { conversation, message_id: id }),
+            Ok(None) => {}
+            Err(error) => self.error("failed to record the call", error),
+        }
+        self.emit(Event::ConversationsChanged);
+    }
+
+    /// A call while another of the app's accounts is in one: "busy", as
+    /// RingRTC answers an offer during a call of this account's, and a
+    /// missed call in the chat.
+    async fn busy_elsewhere(self: &Rc<Self>, peer: &str, device: u32, call_id: CallId, video: bool, at: i64) {
+        info!("a call while another account is in one: busy");
+        let message = to_call_message(call_id, Some(device), &signal_calls::Message::Busy);
+        self.send_call_message(peer, message);
+        let conversation = ConversationId::direct(peer);
+        let notice = Notice::Call { incoming: true, video, outcome: CallOutcome::Missed, call_id: Some(call_id.as_u64() as i64), unseen: true };
         match self.db.record_call(&conversation, at, &notice).await {
             Ok(Some(id)) => self.emit(Event::MessageChanged { conversation, message_id: id }),
             Ok(None) => {}
@@ -683,6 +703,10 @@ impl Actor {
                 Incoming::Offer { call_id, video, opaque } => {
                     if !self.takes_calls_from(&peer).await {
                         self.refuse_call(&peer, sender_device, call_id, video, server_timestamp).await;
+                        continue;
+                    }
+                    if self.config.call_lines.busy_elsewhere(&self.config.data_dir) {
+                        self.busy_elsewhere(&peer, sender_device, call_id, video, server_timestamp).await;
                         continue;
                     }
                     let Some((theirs, ours)) = keys.clone() else { continue };

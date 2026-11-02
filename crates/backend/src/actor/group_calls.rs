@@ -184,7 +184,13 @@ impl Actor {
         Some((call.conversation.clone(), signal_calls::call_id_from_era(call.era.as_deref()?)))
     }
 
+    /// In a call here, or with another of the app's accounts.
     pub(super) fn in_any_call(&self) -> bool {
+        self.in_own_call() || self.config.call_lines.busy_elsewhere(&self.config.data_dir)
+    }
+
+    /// In a call (or ringing, or calling) with this account.
+    pub(super) fn in_own_call(&self) -> bool {
         self.call.borrow().is_some() || self.group_call.borrow().as_ref().is_some_and(|g| g.client_id.is_some())
     }
 

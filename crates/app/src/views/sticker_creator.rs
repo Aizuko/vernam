@@ -975,6 +975,7 @@ mod tests {
                 device_name: "test".into(),
                 demo: true,
                 former_data_dirs: Vec::new(),
+                call_lines: Default::default(),
             })
             .unwrap();
             let (window, view, state) = cx.update(|cx| {

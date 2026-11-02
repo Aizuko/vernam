@@ -319,7 +319,7 @@ impl Composer {
                         // (`ts/state/ducks/composer.preload.ts`). Without
                         // the `stickerReply.send` flag it goes on its own
                         // and the reply stays, as there.
-                        let replies = signal_backend::remote_config().sticker_reply_send();
+                        let replies = this.state.read(cx).remote_config().sticker_reply_send();
                         let quote = this.take_reply_for_media(replies, cx);
                         this.state.update(cx, |state, cx| state.send_sticker(conversation, pack, sticker, quote, cx));
                         this.close_picker(window, cx);
@@ -1257,7 +1257,7 @@ impl Composer {
     /// Queues a file to send as it is; `false` (with a message) when it's
     /// over Signal's limit.
     fn add_file(&mut self, bytes: Vec<u8>, file_name: Option<String>, cx: &mut Context<Self>) -> bool {
-        if signal_backend::too_big_to_send(bytes.len()) {
+        if signal_backend::too_big_to_send(bytes.len(), &self.state.read(cx).remote_config()) {
             return false;
         }
         self.files.push(PendingFile { bytes: Arc::new(bytes), file_name: file_name.unwrap_or_else(|| "file".into()) });
@@ -1290,7 +1290,7 @@ impl Composer {
                     .count();
                 let mut problems = Vec::new();
                 if too_big > 0 {
-                    let limit = signal_backend::size_limit_label(signal_backend::remote_config().attachment_max_bytes());
+                    let limit = signal_backend::size_limit_label(this.state.read(cx).remote_config().attachment_max_bytes());
                     problems.push(format!("{too_big} over Signal's {limit} limit"));
                 }
                 if unreadable > 0 {
@@ -1510,7 +1510,7 @@ impl Composer {
         use gpui_kit::component::button::{Button, ButtonVariants as _};
         use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
         let polls = !self.conversation.is_signal()
-            && self.state.read(cx).conversation(&self.conversation).is_some_and(|c| signal_backend::can_create_poll(c.kind));
+            && self.state.read(cx).conversation(&self.conversation).is_some_and(|c| signal_backend::can_create_poll(c.kind, &self.state.read(cx).remote_config()));
         let this = cx.entity().downgrade();
         let (state, conversation) = (self.state.clone(), self.conversation.clone());
         Button::new("add-button")
@@ -2420,6 +2420,7 @@ mod tests {
             device_name: "test".into(),
             demo: true,
             former_data_dirs: Vec::new(),
+            call_lines: Default::default(),
         })
         .unwrap();
         let (window, composer) = cx.update(|cx| {
@@ -2835,7 +2836,7 @@ mod tests {
             assert!(c.add_file(b"%PDF-1.7".to_vec(), Some("notes.pdf".into()), cx));
             assert!(c.add_file(b"a,b".to_vec(), Some("data.csv".into()), cx));
             // Over Signal's limit: refused.
-            assert!(!c.add_file(vec![0; signal_backend::remote_config().attachment_max_bytes() as usize + 1], Some("big.bin".into()), cx));
+            assert!(!c.add_file(vec![0; c.state.read(cx).remote_config().attachment_max_bytes() as usize + 1], Some("big.bin".into()), cx));
         });
         cx.run_until_parked();
         assert_eq!(cx.update(|cx| f.composer.read(cx).files.len()), 2);

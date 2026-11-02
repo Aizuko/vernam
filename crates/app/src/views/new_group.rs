@@ -41,8 +41,9 @@ struct Limits {
 }
 
 impl Limits {
-    fn now() -> Self {
-        let config = signal_backend::remote_config();
+    /// The account's limits, from its remote config.
+    fn now(state: &AppState) -> Self {
+        let config = state.remote_config();
         Self { recommended: config.group_size_recommended(), hard: config.group_size_hard_limit() }
     }
 }
@@ -113,7 +114,7 @@ pub fn open_add_members(state: Entity<AppState>, conversation: Conversation, win
 }
 
 fn open_picker(state: Entity<AppState>, adding: Option<Adding>, window: &mut Window, cx: &mut App) -> Entity<Picking> {
-    let limits = Limits::now();
+    let limits = Limits::now(state.read(cx));
     // A new group has us in it.
     let already = adding.as_ref().map_or(1, |a| a.conversation.members.len());
     let existing: BTreeSet<String> = adding.as_ref().map(|a| a.conversation.members.iter().cloned().collect()).unwrap_or_default();
@@ -390,7 +391,7 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new() };
+        let config = Config { data_dir: dir.path().to_owned(), db_key: [7; 32], device_name: "test".into(), demo: true, former_data_dirs: Vec::new(), call_lines: Default::default() };
         let (backend, mut events) = Backend::start(config).unwrap();
         let state = cx.update(|cx| crate::state::new_state(backend.clone(), cx));
         cx.update(|cx| {

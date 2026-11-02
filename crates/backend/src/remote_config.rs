@@ -15,7 +15,8 @@
 //! that gets a feature: see [`RemoteConfig::feature`].
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::cell::RefCell;
+use std::sync::{Arc, RwLock};
 
 /// The Signal Desktop release this client's behavior follows, for version
 /// flags. Its code is compared with Desktop 8.34 (`v8.34.0-alpha.1`), and
@@ -289,23 +290,51 @@ fn parse_int(value: &str) -> Option<i64> {
     Some(if negative { -number } else { number })
 }
 
-static CURRENT: LazyLock<RwLock<Arc<RemoteConfig>>> = LazyLock::new(Default::default);
+/// One account's config in effect: the last one fetched (or loaded at
+/// start), or an empty one, where every limit is Desktop's default and
+/// every version flag is off, as Desktop is before its first fetch. Each
+/// backend has its own (the server's flags are per account); the
+/// interface reads it through [`crate::Backend::remote_config`].
+#[derive(Clone, Default)]
+pub struct ConfigCell(Arc<RwLock<Arc<RemoteConfig>>>);
 
-/// The config in effect: the last one fetched (or loaded at start), or an
-/// empty one, where every limit is Desktop's default and every version
-/// flag is off, as Desktop is before its first fetch.
-pub fn current() -> Arc<RemoteConfig> {
-    CURRENT.read().unwrap_or_else(|e| e.into_inner()).clone()
+impl ConfigCell {
+    pub fn get(&self) -> Arc<RemoteConfig> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Puts `config` in effect; returns whether it differs from the last one.
+    pub(crate) fn set(&self, config: RemoteConfig) -> bool {
+        let mut current = self.0.write().unwrap_or_else(|e| e.into_inner());
+        if **current == config {
+            return false;
+        }
+        *current = Arc::new(config);
+        true
+    }
 }
 
-/// Puts `config` in effect; returns whether it differs from the last one.
+thread_local! {
+    /// The backend thread's account's config (see [`install`]).
+    static CURRENT: RefCell<ConfigCell> = RefCell::default();
+}
+
+/// Makes `cell` the config [`current`] reads on this thread: the backend
+/// thread's, where all of an account's actor work runs (`spawn_local`).
+pub(crate) fn install(cell: ConfigCell) {
+    CURRENT.with(|current| *current.borrow_mut() = cell);
+}
+
+/// The config in effect for the account whose backend thread this is (an
+/// empty one on any other thread).
+pub fn current() -> Arc<RemoteConfig> {
+    CURRENT.with(|current| current.borrow().get())
+}
+
+/// Puts `config` in effect for this thread's account; returns whether it
+/// differs from the last one.
 pub(crate) fn set_current(config: RemoteConfig) -> bool {
-    let mut current = CURRENT.write().unwrap_or_else(|e| e.into_inner());
-    if **current == config {
-        return false;
-    }
-    *current = Arc::new(config);
-    true
+    CURRENT.with(|current| current.borrow().set(config))
 }
 
 /// The config saved in the database, if any.
@@ -317,6 +346,23 @@ pub(crate) async fn load(db: &signal_store::AppDb) -> Option<RemoteConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_account_has_its_own_config() {
+        let (mine, theirs) = (ConfigCell::default(), ConfigCell::default());
+        let config = RemoteConfig::from_pairs([("global.pinnedChatLimit", "9")]);
+        assert!(mine.set(config.clone()));
+        assert!(!mine.set(config), "unchanged");
+        assert_eq!(mine.get().pinned_chat_limit(), 9);
+        assert_eq!(*theirs.get(), RemoteConfig::default());
+        // The backend thread reads its own.
+        std::thread::spawn(move || {
+            install(theirs);
+            assert_eq!(*current(), RemoteConfig::default());
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn keeps_desktops_keys_and_drops_false() {

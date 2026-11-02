@@ -2791,6 +2791,11 @@ impl AppState {
         .detach();
     }
 
+    /// This account's remote config in effect.
+    pub fn remote_config(&self) -> std::sync::Arc<signal_backend::RemoteConfig> {
+        self.backend.remote_config()
+    }
+
     /// Our own service id.
     pub fn our_aci(&self) -> Option<&str> {
         self.account.as_ref().map(|a| a.aci.as_str())
