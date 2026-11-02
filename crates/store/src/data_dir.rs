@@ -38,9 +38,11 @@ impl AppDb {
     /// those of [`WRITTEN`], so that a path kept somewhere new (a JSON
     /// field, a setting) isn't missed. Only a path is rewritten: a value
     /// that starts with `from`, or a JSON string that does (just after its
-    /// `"`), never `from` in the middle of a sentence. Full-text search
-    /// tables are left alone. One transaction per table. Returns how many
-    /// rows changed.
+    /// `"`), never `from` in the middle of a sentence. A path already in
+    /// `to` is left as it is, so that a rewrite cut short can run again
+    /// when `to` is inside `from` (an account's data moving into
+    /// `accounts/<id>/`). Full-text search tables are left alone. One
+    /// transaction per table. Returns how many rows changed.
     pub async fn rebase_paths(&self, from: &str, to: &str) -> Result<u64> {
         let (from, to) = (format!("{}/", from.trim_end_matches('/')), format!("{}/", to.trim_end_matches('/')));
         let tables: Vec<(String, String)> = sqlx::query_as(
@@ -75,15 +77,17 @@ impl AppDb {
             }
             let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
             // ?1 and ?2: the directories; ?3 and ?4: as a JSON string
-            // starts. Only text: `replace` would turn a number or a blob
-            // into text.
+            // starts; ?5 stands in for ?4 while ?3 is replaced, so paths
+            // already in `to` stay. Only text: `replace` would turn a
+            // number or a blob into text.
             let sets = columns
                 .iter()
                 .map(|c| {
                     format!(
-                        "{0} = CASE WHEN typeof({0}) = 'text' THEN replace(\
-                         CASE WHEN substr({0}, 1, length(?1)) = ?1 THEN ?2 || substr({0}, length(?1) + 1) ELSE {0} END, \
-                         ?3, ?4) ELSE {0} END",
+                        "{0} = CASE WHEN typeof({0}) = 'text' THEN replace(replace(replace(\
+                         CASE WHEN substr({0}, 1, length(?1)) = ?1 AND substr({0}, 1, length(?2)) <> ?2 \
+                         THEN ?2 || substr({0}, length(?1) + 1) ELSE {0} END, \
+                         ?4, ?5), ?3, ?4), ?5, ?4) ELSE {0} END",
                         quote(c)
                     )
                 })
@@ -100,6 +104,7 @@ impl AppDb {
                 .bind(&to)
                 .bind(format!("\"{from}"))
                 .bind(format!("\"{to}"))
+                .bind("\u{1}rebased\u{1}")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;

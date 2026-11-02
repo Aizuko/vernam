@@ -1553,6 +1553,28 @@ async fn stored_paths_follow_a_moved_data_directory() {
 }
 
 #[tokio::test]
+async fn stored_paths_move_into_an_account_directory_once() {
+    // The data directory became the first account's, inside the old one.
+    let db = test_db().await;
+    let (old, new) = ("/s/io.github.knpwrs.Vernam", "/s/io.github.knpwrs.Vernam/accounts/0a1b");
+    let id = db.insert_message(&incoming("d:a", "a", 1, "see the photo")).await.unwrap();
+    sqlx::query("UPDATE messages SET attachments = ?1 WHERE id = ?2")
+        .bind(format!(r#"[{{"local_path":"{old}/attachments/1.png","thumbnail":"{new}/attachments/1-thumb.png"}}]"#))
+        .bind(id)
+        .execute(&db.writer)
+        .await
+        .unwrap();
+    db.set_person_avatar("b", &format!("{old}/avatars/b.jpg")).await.unwrap();
+    // Twice, as after a rewrite cut short: what's in `new` stays put.
+    db.rebase_paths(old, new).await.unwrap();
+    db.rebase_paths(old, new).await.unwrap();
+    let attachments: String =
+        sqlx::query_scalar("SELECT attachments FROM messages WHERE id = ?").bind(id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(attachments, format!(r#"[{{"local_path":"{new}/attachments/1.png","thumbnail":"{new}/attachments/1-thumb.png"}}]"#));
+    assert_eq!(db.person_avatars().await.unwrap(), [("b".to_owned(), format!("{new}/avatars/b.jpg"))]);
+}
+
+#[tokio::test]
 async fn a_message_named_by_author_and_time_is_one_seek() {
     // Receipts, reactions and read syncs name a message this way. Reading
     // every message by the author instead took 2 to 5 seconds a receipt on
