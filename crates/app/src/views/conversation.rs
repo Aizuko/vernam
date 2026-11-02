@@ -119,6 +119,9 @@ pub struct ConversationView {
     /// ring does).
     timeline_focus: FocusHandle,
     timeline_focused: bool,
+    /// Whether the last draw showed the composer (a left group, an
+    /// announcement-only one and a message request have a bar instead).
+    composer_shown: std::cell::Cell<bool>,
     /// Unread messages when the chat opened, for ⌘J.
     unread_at_open: u32,
     /// Target the newest message once it's loaded (End, from older ones).
@@ -362,11 +365,15 @@ impl ConversationView {
                     PickerEvent::Customize => {
                         this.reaction_picker_for = None;
                         let tone = this.picker.read(cx).skin_tone();
+                        // First, so the dialog takes the keyboard from the
+                        // composer and gives it back there when it closes.
+                        this.back_from_picker(window, cx);
                         crate::views::preferred_reactions::open(this.state.clone(), tone, window, cx);
+                        cx.notify();
+                        return;
                     }
                 }
-                let handle = this.composer.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
+                this.back_from_picker(window, cx);
                 cx.notify();
             }),
         ];
@@ -415,6 +422,7 @@ impl ConversationView {
             targeted: None,
             timeline_focus,
             timeline_focused: false,
+            composer_shown: std::cell::Cell::new(false),
             unread_at_open,
             target_newest: false,
             slots: Default::default(),
@@ -4944,6 +4952,7 @@ impl Render for ConversationView {
         // Read fresh each draw; the focus subscriptions redraw it as focus
         // comes and goes.
         self.timeline_focused = self.timeline_focus.is_focused(window);
+        self.composer_shown.set(false);
         let palette = Palette::get(cx);
         let entity = cx.entity();
         // Messages that arrived while scrolled up wait below, even when the
@@ -5014,8 +5023,14 @@ impl Render for ConversationView {
                                 .absolute()
                                 .bottom_2()
                                 .right_4()
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                                     this.reaction_picker_for = None;
+                                    // Back to typing, as a pick or Escape
+                                    // does. What was clicked, if it takes
+                                    // focus, takes it after this.
+                                    if this.picker.read(cx).focus_handle(cx).is_focused(window) {
+                                        this.back_from_picker(window, cx);
+                                    }
                                     cx.notify();
                                 }))
                                 .child(self.picker.clone()),
@@ -5086,7 +5101,10 @@ impl Render for ConversationView {
                             .text_color(palette.text_secondary)
                             .child("You are no longer a member of the group."),
                     ),
-                    None => d.child(self.composer.clone()),
+                    None => {
+                        self.composer_shown.set(true);
+                        d.child(self.composer.clone())
+                    }
                 }
             })
     }
@@ -5705,6 +5723,17 @@ impl ConversationView {
         let handle = self.composer.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
+    }
+
+    /// Where the keyboard goes when the reaction picker closes: the
+    /// composer, or the timeline in a chat that has none.
+    fn back_from_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composer_shown.get() {
+            let handle = self.composer.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        } else {
+            window.focus(&self.timeline_focus, cx);
+        }
     }
 
     /// A timeline key's handler, for when the timeline itself has the
@@ -8162,6 +8191,11 @@ mod tests {
         assert_eq!(picker.read_with(cx, |p, _| p.query().to_owned()), "thumbs up");
         assert_eq!(opened.get(), 0, "the photo didn't open");
         assert!(cx.update(|window, cx| picker.read(cx).focus_handle(cx).is_focused(window)), "the search kept focus");
+
+        // Clicking outside (the header) closes it and goes back to typing.
+        cx.simulate_click(gpui_kit::point(px(450.), px(20.)), gpui_kit::Modifiers::none());
+        assert_eq!(view.read_with(cx, |v, _| v.reaction_picker_for), None);
+        assert!(cx.update(|window, cx| view.read(cx).composer.read(cx).focus_handle(cx).is_focused(window)));
         backend.shutdown();
     }
 
