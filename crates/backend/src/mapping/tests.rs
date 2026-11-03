@@ -1660,6 +1660,37 @@ fn shared_contacts_keep_the_first_as_desktop_reads_it() {
 }
 
 #[test]
+fn shared_contacts_go_as_desktop_sends_them() {
+    let contact = signal_store::SharedContact {
+        given_name: "Rosa".into(),
+        family_name: "Delgado".into(),
+        aci: Some(BOB.into()),
+        signal_nickname_given: "Ro".into(),
+        note: Some("Fixed the sink".into()),
+        numbers: vec![signal_store::ContactMethod { value: "+15550100142".into(), kind: signal_store::ContactMethodKind::Custom, label: None }],
+        organization: Some("Delgado Plumbing".into()),
+        ..Default::default()
+    };
+    let proto = contact_proto(&contact);
+    let name = proto.name.clone().unwrap();
+    assert_eq!((name.given_name.as_deref(), name.family_name.as_deref(), name.prefix), (Some("Rosa"), Some("Delgado"), None));
+    assert_eq!(proto.number[0].r#type, Some(4));
+    assert_eq!(proto.aci_binary, Some(Aci::parse_from_service_id_string(BOB).unwrap().service_id_binary()));
+    assert_eq!(proto.nickname.as_ref().and_then(|n| n.given.as_deref()), Some("Ro"));
+    assert_eq!(proto.avatar, None);
+    // What's received back is what was sent.
+    let mut dm = DataMessage { contact: vec![proto], timestamp: Some(100), ..Default::default() };
+    with_contact_avatar(&mut dm, AttachmentPointer { content_type: Some("image/jpeg".into()), ..Default::default() }, true);
+    let Some((signal_store::MessageContent::Contact(back), Some(_))) = message_content(&dm) else { panic!() };
+    let back = *back;
+    assert!(back.avatar_is_profile);
+    assert_eq!(signal_store::SharedContact { avatar: None, avatar_is_profile: false, ..back }, contact);
+    // Nothing to name them, and no nickname: neither goes.
+    let bare = contact_proto(&signal_store::SharedContact { numbers: contact.numbers.clone(), ..Default::default() });
+    assert_eq!((bare.name, bare.nickname, bare.aci_binary, bare.note), (None, None, None, None));
+}
+
+#[test]
 fn payments_map_as_desktops_process_payment() {
     use data_message::payment::{Activation, Item, Notification, activation};
     let payment = |item| DataMessage { payment: Some(data_message::Payment { item }), timestamp: Some(100), ..Default::default() };

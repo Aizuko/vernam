@@ -1358,6 +1358,7 @@ pub fn message_content(dm: &DataMessage) -> Option<(signal_store::MessageContent
                 .collect(),
             organization: text(&contact.organization),
             avatar: image.as_ref().map(attachment_meta),
+            avatar_is_profile: contact.avatar.as_ref().and_then(|a| a.is_profile).unwrap_or(false),
         };
         return Some((MessageContent::Contact(Box::new(shared)), image));
     }
@@ -1385,6 +1386,76 @@ pub fn message_content(dm: &DataMessage) -> Option<(signal_store::MessageContent
         badge_id: None,
     };
     Some((MessageContent::GiftBadge(gift), None))
+}
+
+/// A shared contact as Desktop sends it (`ts/textsecure/SendMessage.preload.ts`,
+/// the `contact` entries of `toProto`): empty fields left out, the ACI in
+/// `aciBinary`, the nickname only when it has a name. The photo goes in
+/// once it's uploaded ([`with_contact_avatar`]).
+pub fn contact_proto(contact: &signal_store::SharedContact) -> data_message::Contact {
+    use data_message::contact::{Email, Name, Phone, PostalAddress, SignalNickname};
+    use signal_store::{AddressKind, ContactMethodKind};
+    let text = |value: &str| Some(value.to_owned()).filter(|v| !v.is_empty());
+    let method_kind = |kind: ContactMethodKind| match kind {
+        ContactMethodKind::Home => 1,
+        ContactMethodKind::Mobile => 2,
+        ContactMethodKind::Work => 3,
+        ContactMethodKind::Custom => 4,
+    };
+    let name = Name {
+        given_name: text(&contact.given_name),
+        family_name: text(&contact.family_name),
+        prefix: text(&contact.prefix),
+        suffix: text(&contact.suffix),
+        middle_name: text(&contact.middle_name),
+        nickname: text(&contact.nickname),
+    };
+    let has_name = name != Name::default();
+    let nickname = SignalNickname { given: text(&contact.signal_nickname_given), family: text(&contact.signal_nickname_family) };
+    data_message::Contact {
+        name: has_name.then_some(name),
+        number: contact
+            .numbers
+            .iter()
+            .map(|n| Phone { value: Some(n.value.clone()), r#type: Some(method_kind(n.kind)), label: n.label.clone() })
+            .collect(),
+        email: contact
+            .emails
+            .iter()
+            .map(|e| Email { value: Some(e.value.clone()), r#type: Some(method_kind(e.kind)), label: e.label.clone() })
+            .collect(),
+        address: contact
+            .addresses
+            .iter()
+            .map(|a| PostalAddress {
+                r#type: Some(match a.kind {
+                    AddressKind::Home => 1,
+                    AddressKind::Work => 2,
+                    AddressKind::Custom => 3,
+                }),
+                label: a.label.clone(),
+                street: a.street.clone(),
+                pobox: a.pobox.clone(),
+                neighborhood: a.neighborhood.clone(),
+                city: a.city.clone(),
+                region: a.region.clone(),
+                postcode: a.postcode.clone(),
+                country: a.country.clone(),
+            })
+            .collect(),
+        avatar: None,
+        organization: contact.organization.clone().filter(|o| !o.is_empty()),
+        aci_binary: contact.aci.as_deref().and_then(Aci::parse_from_service_id_string).map(|aci| aci.service_id_binary()),
+        nickname: (nickname.given.is_some() || nickname.family.is_some()).then_some(nickname),
+        note: contact.note.clone().filter(|n| !n.is_empty()),
+    }
+}
+
+/// Puts a shared contact's uploaded photo in the message.
+pub fn with_contact_avatar(data: &mut DataMessage, pointer: AttachmentPointer, is_profile: bool) {
+    if let Some(contact) = data.contact.first_mut() {
+        contact.avatar = Some(data_message::contact::Avatar { avatar: Some(pointer), is_profile: Some(is_profile) });
+    }
 }
 
 /// Desktop's `isValidTapToView` (`ts/util/isValidTapToView.std.ts`): no

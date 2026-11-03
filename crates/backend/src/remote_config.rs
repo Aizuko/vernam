@@ -97,6 +97,12 @@ impl RemoteConfig {
         self.feature("pollSend1to1")
     }
 
+    /// Sharing a contact from the composer (`desktop.shareContact`,
+    /// Desktop's `isShareContactEnabled` in `CompositionArea`).
+    pub fn share_contact(&self) -> bool {
+        self.feature("shareContact")
+    }
+
     /// Acting on group admins' deletes of others' messages
     /// (`isAdminDeleteReceiveEnabled`).
     pub fn admin_delete_receive(&self) -> bool {
@@ -392,6 +398,8 @@ mod tests {
         assert!(!RemoteConfig::default().poll_send_1to1());
         // Internal users get everything.
         assert!(RemoteConfig::from_pairs([("desktop.internalUser", "true")]).group_terminate_send());
+        assert!(RemoteConfig::from_pairs([("desktop.shareContact.prod", "8.30.0")]).share_contact());
+        assert!(!RemoteConfig::from_pairs([("desktop.shareContact.beta", "8.30.0")]).share_contact());
     }
 
     #[test]

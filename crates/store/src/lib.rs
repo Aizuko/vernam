@@ -1663,6 +1663,11 @@ impl AppDb {
         Ok(())
     }
 
+    /// One person's downloaded profile photo.
+    pub async fn person_avatar(&self, service_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT path FROM person_avatars WHERE service_id = ?").bind(service_id).fetch_optional(&self.pool).await?)
+    }
+
     pub async fn person_avatars(&self) -> Result<Vec<(String, String)>> {
         Ok(sqlx::query_as("SELECT service_id, path FROM person_avatars").fetch_all(&self.pool).await?)
     }

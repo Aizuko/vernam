@@ -876,6 +876,7 @@ const DEMO_REMOTE_CONFIG: &[(&str, &str)] = &[
     ("desktop.groupMemberLabels.edit.prod", "8.30.0"),
     ("desktop.groupTerminate.send.prod", "8.30.0"),
     ("desktop.keyTransparency.prod", "8.30.0"),
+    ("desktop.shareContact.prod", "8.30.0"),
 ];
 
 pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::UnboundedSender<Event>) {
@@ -1295,6 +1296,46 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
             Command::MarkRead { conversation } => {
                 let _ = db.mark_read(&conversation).await;
                 let _ = db.take_unread_poll_votes(&conversation).await;
+                emit(Event::ConversationsChanged);
+            }
+            Command::ShareContact { conversation, share } => {
+                if !crate::share_contact::can_share(&share) {
+                    continue;
+                }
+                let sent_at = next_sent_at();
+                let msg = NewMessage {
+                    conversation_id: conversation.clone(),
+                    sent_at,
+                    received_at: sent_at,
+                    direction: Direction::Outgoing,
+                    author: None,
+                    author_name: None,
+                    body: String::new(),
+                    status: DeliveryStatus::Sent,
+                    quote: None,
+                    attachments: vec![],
+                    link_preview: None,
+                    expires_in: 0,
+                };
+                let Ok(id) = db.insert_message(&msg).await else { continue };
+                // The photo shows from where it is (nothing is uploaded here).
+                let mut contact = share.contact;
+                contact.avatar = share.avatar.map(|avatar| AttachmentMeta {
+                    content_type: "image/jpeg".into(),
+                    file_name: None,
+                    size: 0,
+                    width: None,
+                    height: None,
+                    local_path: Some(avatar.path),
+                    sticker: false,
+                    gif: false,
+                    voice: false,
+                    remote: None,
+                    thumbnail_path: None,
+                    sticker_pack: None,
+                });
+                let _ = db.set_content(id, &signal_store::MessageContent::Contact(Box::new(contact))).await;
+                emit(Event::MessageChanged { conversation: conversation.clone(), message_id: id });
                 emit(Event::ConversationsChanged);
             }
             Command::SendPoll { conversation, question, options, allow_multiple } => {

@@ -43,6 +43,7 @@ pub mod message_requests;
 pub mod auto_download;
 pub mod routes;
 pub mod server_alerts;
+pub mod share_contact;
 mod sender_keys;
 
 pub use remote_config::{ConfigCell, RemoteConfig};
@@ -408,6 +409,9 @@ pub enum Command {
     React { message_id: i64, emoji: String, remove: bool },
     /// Sends a poll (Desktop's "New poll"); empty options are left out.
     SendPoll { conversation: ConversationId, question: String, options: Vec<String>, allow_multiple: bool },
+    /// Shares a contact in a chat (Desktop's `enqueueSharedContactForSend`):
+    /// a message with only the contact, its photo copied and uploaded.
+    ShareContact { conversation: ConversationId, share: Box<share_contact::ShareContact> },
     /// Votes in poll `message_id` for these options (none takes our vote
     /// back).
     VotePoll { message_id: i64, options: Vec<u32> },

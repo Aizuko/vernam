@@ -24,6 +24,7 @@ mod alerts;
 mod receipts;
 mod session_reset;
 mod settings;
+mod share_contact;
 
 pub(crate) use view_once::VIEW_ONCE_DIR;
 
@@ -193,6 +194,17 @@ enum Outbound {
         timestamp: u64,
         message: i64,
         path: std::path::PathBuf,
+    },
+    /// A shared contact; its photo is uploaded for `body.contact[0].avatar`.
+    SendContact {
+        conversation: ConversationId,
+        body: DataMessage,
+        timestamp: u64,
+        message: i64,
+        avatar: std::path::PathBuf,
+        /// The photo's type, as stored when it was copied.
+        content_type: String,
+        is_profile: bool,
     },
     /// Our vote numbered `vote_count` in poll `message`, to whoever it
     /// hasn't reached yet; `attempt` counts from 1 (Desktop's job queue
@@ -369,7 +381,8 @@ impl Outbound {
             Outbound::Send { conversation, message: Some(_), .. }
             | Outbound::SendImages { conversation, .. }
             | Outbound::SendGif { conversation, .. }
-            | Outbound::SendSticker { conversation, .. } => Some(conversation),
+            | Outbound::SendSticker { conversation, .. }
+            | Outbound::SendContact { conversation, .. } => Some(conversation),
             _ => None,
         }
     }
@@ -381,7 +394,8 @@ impl Outbound {
             Outbound::Send { conversation, message: Some(id), timestamp, .. }
             | Outbound::SendImages { conversation, message: id, timestamp, .. }
             | Outbound::SendSticker { conversation, message: id, timestamp, .. }
-            | Outbound::SendGif { conversation, message: id, timestamp, .. } => Some((conversation.clone(), *id, *timestamp)),
+            | Outbound::SendGif { conversation, message: id, timestamp, .. }
+            | Outbound::SendContact { conversation, message: id, timestamp, .. } => Some((conversation.clone(), *id, *timestamp)),
             _ => None,
         }
     }
@@ -942,6 +956,7 @@ impl Actor {
                 Command::SendPoll { conversation, question, options, allow_multiple } => {
                     self.send_poll(conversation, question, options, allow_multiple).await
                 }
+                Command::ShareContact { conversation, share } => self.share_contact(conversation, *share).await,
                 Command::VotePoll { message_id, options } => self.vote_in_poll(message_id, options).await,
                 Command::EndPoll { message_id } => self.end_poll(message_id).await,
                 Command::MarkRead { conversation } => self.mark_read(conversation).await,
@@ -3722,6 +3737,10 @@ impl Actor {
         };
         let mut data = data;
         polls::poll_data(&mut data, &message);
+        if let Some(signal_store::MessageContent::Contact(contact)) = &message.content {
+            data.contact = vec![mapping::contact_proto(contact)];
+            return self.enqueue_contact(conversation, message_id, data, timestamp, contact);
+        }
         // Ours stays view-once until it's sent.
         if message.view_once == Some(signal_store::ViewOnce::Ready) {
             data.is_view_once = Some(true);
@@ -4637,7 +4656,8 @@ impl Actor {
                     Outbound::Send { conversation, message: Some(id), timestamp, .. }
                     | Outbound::SendImages { conversation, message: id, timestamp, .. }
                     | Outbound::SendSticker { conversation, message: id, timestamp, .. }
-                    | Outbound::SendGif { conversation, message: id, timestamp, .. } => {
+                    | Outbound::SendGif { conversation, message: id, timestamp, .. }
+                    | Outbound::SendContact { conversation, message: id, timestamp, .. } => {
                         self.finish_send(&conversation, id, timestamp, DeliveryStatus::Failed).await;
                     }
                     Outbound::Delete { conversation, target, .. } => {
@@ -4740,6 +4760,27 @@ impl Actor {
                         }
                         Err(error) => {
                             self.error("failed to send sticker", format!("{error:#}"));
+                            DeliveryStatus::Failed
+                        }
+                    };
+                    self.finish_send(&conversation, message, timestamp, status).await;
+                }
+                // A photo that's gone (a resend after its copy was cleaned
+                // up) is left out, as a first send leaves out one it can't
+                // copy.
+                Outbound::SendContact { conversation, body, timestamp, message, avatar, .. } if !avatar.exists() => {
+                    warn!("a shared contact's photo is missing; sending it without");
+                    let status = self.deliver(&mut manager, &conversation, body.into(), timestamp, message).await;
+                    self.finish_send(&conversation, message, timestamp, status).await;
+                }
+                Outbound::SendContact { conversation, mut body, timestamp, message, avatar, content_type, is_profile } => {
+                    let status = match self.upload_contact_avatar(&manager, &avatar, content_type).await {
+                        Ok(pointer) => {
+                            mapping::with_contact_avatar(&mut body, pointer, is_profile);
+                            self.deliver(&mut manager, &conversation, body.into(), timestamp, message).await
+                        }
+                        Err(error) => {
+                            self.error("failed to send the shared contact", format!("{error:#}"));
                             DeliveryStatus::Failed
                         }
                     };

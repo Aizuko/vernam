@@ -1,8 +1,8 @@
 //! What a message can hold in place of text: a shared contact, a payment
 //! notification or a gift badge (Desktop's `contact`, `payment` and
-//! `giftBadge` message attributes, `ts/model-types.d.ts`). They're shown,
-//! never sent from here: payments and redeeming gift badges happen on the
-//! phone.
+//! `giftBadge` message attributes, `ts/model-types.d.ts`). A contact can
+//! be shared from the composer; payments and redeeming gift badges happen
+//! on the phone.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +57,10 @@ pub struct SharedContact {
     /// Their photo: downloaded to `local_path` when it is.
     #[serde(default)]
     pub avatar: Option<AttachmentMeta>,
+    /// The photo is their Signal profile photo rather than one from the
+    /// sharer's address book (`Avatar.isProfile`).
+    #[serde(default)]
+    pub avatar_is_profile: bool,
 }
 
 impl SharedContact {
