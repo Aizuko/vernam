@@ -1648,7 +1648,10 @@ fn record_aci(record: &ContactRecord) -> Option<Uuid> {
     } else {
         record.aci.parse().ok()?
     };
-    (!aci.is_nil()).then_some(aci)
+    // Some phones wrote a contact record for the Signal chat's made-up
+    // account; its state lives in the account record, so the record is
+    // dropped (Desktop's `mergeContactRecord`, `isSignalServiceId`).
+    (!aci.is_nil() && aci.to_string() != signal_store::SIGNAL_ACI).then_some(aci)
 }
 
 /// What a contact record says about someone. Their name follows Desktop's
@@ -1919,6 +1922,25 @@ mod tests {
         let record = ContactRecord { aci: ACI.into(), given_name: "Maya".into(), ..Default::default() };
         let contact = from_record(&record).unwrap();
         assert_eq!((contact.system_name, contact.username), (false, None));
+    }
+
+    #[test]
+    fn contact_records_for_the_signal_chat_are_dropped() {
+        let record = ContactRecord {
+            aci: signal_store::SIGNAL_ACI.into(),
+            given_name: "Signal".into(),
+            archived: true,
+            blocked: true,
+            ..Default::default()
+        };
+        assert!(from_record(&record).is_none());
+        assert!(contact_chat(&record).is_none());
+        let binary = ContactRecord {
+            aci_binary: Uuid::parse_str(signal_store::SIGNAL_ACI).unwrap().as_bytes().to_vec(),
+            archived: true,
+            ..Default::default()
+        };
+        assert!(contact_chat(&binary).is_none());
     }
 
     #[test]
