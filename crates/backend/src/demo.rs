@@ -664,6 +664,23 @@ async fn demo_stickers_installed(db: &AppDb, data_dir: &Path) -> Vec<crate::Stic
     packs
 }
 
+/// The demo's favorites: every demo pack's stickers are on disk, installed
+/// or not.
+async fn demo_favorite_stickers(db: &AppDb, data_dir: &Path) -> Vec<crate::FavoriteStickerView> {
+    let packs = demo_all_stickers(data_dir);
+    db.favorite_stickers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(signal_store::FavoriteSticker::is_active)
+        .filter_map(|f| {
+            let pack = packs.iter().find(|p| hex::encode(&p.id) == f.pack_id)?;
+            let sticker = pack.stickers.iter().find(|s| s.id == f.sticker_id)?.clone();
+            Some(crate::FavoriteStickerView { pack_id: pack.id.clone(), pack_key: pack.key.clone(), sticker })
+        })
+        .collect()
+}
+
 fn demo_summary(pack: &crate::StickerPackView, installed: bool) -> crate::stickers::StickerPackSummary {
     crate::stickers::StickerPackSummary {
         id: pack.id.clone(),
@@ -873,6 +890,7 @@ const DEMO_REMOTE_CONFIG: &[(&str, &str)] = &[
     ("desktop.adminDelete.receive.prod", "8.30.0"),
     ("desktop.adminDelete.send.prod", "8.30.0"),
     ("desktop.stickerReply.send.prod", "8.30.0"),
+    ("desktop.stickerFavorites.prod", "8.30.0"),
     ("desktop.groupMemberLabels.edit.prod", "8.30.0"),
     ("desktop.groupTerminate.send.prod", "8.30.0"),
     ("desktop.keyTransparency.prod", "8.30.0"),
@@ -1755,7 +1773,24 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                     emit(Event::MessageChanged { conversation, message_id: id });
                 }
             }
-            Command::LoadStickers => emit(Event::Stickers(demo_stickers_installed(&db, &data_dir).await)),
+            Command::LoadStickers => {
+                emit(Event::Stickers(demo_stickers_installed(&db, &data_dir).await));
+                emit(Event::FavoriteStickers(demo_favorite_stickers(&db, &data_dir).await));
+            }
+            // Kept as the real backend keeps them; nothing is written to
+            // Storage Service.
+            Command::SetStickerFavorite { pack_id, pack_key, sticker_id, favorite } => {
+                let now = now();
+                let result = if favorite {
+                    db.favorite_sticker(&hex::encode(&pack_id), &hex::encode(&pack_key), sticker_id, now).await.map(|_| ())
+                } else {
+                    db.unfavorite_sticker(&hex::encode(&pack_id), sticker_id, now).await.map(|_| ())
+                };
+                if let Err(e) = result {
+                    emit(Event::Error(format!("failed to save the favorite sticker: {e}")));
+                }
+                emit(Event::FavoriteStickers(demo_favorite_stickers(&db, &data_dir).await));
+            }
             Command::LoadStickerManager => emit(Event::StickerManager(demo_sticker_manager(&db, &data_dir).await)),
             // The demo's stickers keep their pack on the attachment.
             Command::FindMessageStickerPack { message_id } => {

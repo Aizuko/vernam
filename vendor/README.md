@@ -146,6 +146,10 @@ Powers for signal-gpui since 2026-10-15. Changes:
 - `protobuf/StorageService.proto`: `InstalledStickerPackRecord` and its
   identifier and record type (6), from Signal Desktop's
   `protos/SignalStorage.proto`, for installed sticker packs.
+- `protobuf/StorageService.proto`: `HiddenStickerPackRecord` (10) and
+  `FavoriteStickerRecord` (11) with their identifier types, from Signal
+  Desktop's `protos/SignalStorage.proto` (commit 8e3dc06), for favorite
+  stickers.
 - `src/websocket/mod.rs`: a socket whose last answered keepalive is more
   than five minutes old by the wall clock is closed at the next keepalive
   (Desktop's `STALE_THRESHOLD_MS`), and `SignalWebSocket::check` sends a

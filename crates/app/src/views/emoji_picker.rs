@@ -5,6 +5,7 @@
 //! user's own usage, so the picker and `:shortcode` completion agree.
 
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{Icon, input::Enter};
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::*;
@@ -380,7 +381,8 @@ impl EmojiPicker {
         }
     }
 
-    /// Stickers to show: recents and every pack, or those whose emoji
+    /// Stickers to show: favorites (with `stickerFavorites` on, Desktop's
+    /// `FunPanelStickers`), recents and every pack, or those whose emoji
     /// matches the search (Desktop searches emoji, then their stickers).
     fn sticker_sections(&self, cx: &App) -> Vec<StickerSection> {
         let state = self.state.read(cx);
@@ -407,6 +409,29 @@ impl EmojiPicker {
             return if matches.is_empty() { Vec::new() } else { vec![("Results".into(), matches)] };
         }
         let mut sections = Vec::new();
+        if state.remote_config().sticker_favorites() {
+            // A favorite from a pack that isn't installed sends with a pack
+            // of its own.
+            let favorites: Vec<_> = state
+                .favorite_stickers
+                .iter()
+                .map(|f| {
+                    let pack = packs.iter().find(|p| p.id == f.pack_id).cloned().unwrap_or_else(|| {
+                        Arc::new(StickerPackView {
+                            id: f.pack_id.clone(),
+                            key: f.pack_key.clone(),
+                            title: String::new(),
+                            author: String::new(),
+                            stickers: vec![f.sticker.clone()],
+                        })
+                    });
+                    (pack, f.sticker.clone())
+                })
+                .collect();
+            if !favorites.is_empty() {
+                sections.push(("Favorites".into(), favorites));
+            }
+        }
         let recents: Vec<_> = state
             .recent_stickers
             .iter()
@@ -428,6 +453,13 @@ impl EmojiPicker {
 
     fn render_stickers(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let sections = self.sticker_sections(cx);
+        let favorites: Option<std::collections::HashSet<(Vec<u8>, u32)>> = {
+            let state = self.state.read(cx);
+            state
+                .remote_config()
+                .sticker_favorites()
+                .then(|| state.favorite_stickers.iter().map(|f| (f.pack_id.clone(), f.sticker.id)).collect())
+        };
         let empty = if !self.query.trim().is_empty() {
             "No stickers found"
         } else {
@@ -473,7 +505,25 @@ impl EmojiPicker {
                     .child(div().flex().flex_wrap().children(stickers.into_iter().enumerate().map(
                         |(ix, (pack, sticker))| {
                             let path = sticker.path.clone();
-                            div()
+                            // Favoriting, from the sticker's menu (Desktop has
+                            // `markStickerAsFavorite` and no control for it yet).
+                            let favorite = favorites.as_ref().map(|f| f.contains(&(pack.id.clone(), sticker.id)));
+                            let menu = favorite.map(|favorite| {
+                                let (state, pack, sticker_id) = (self.state.clone(), pack.clone(), sticker.id);
+                                move |menu: gpui_kit::component::menu::PopupMenu, _: &mut Window, _: &mut Context<gpui_kit::component::menu::PopupMenu>| {
+                                    let (state, pack) = (state.clone(), pack.clone());
+                                    let label = if favorite { "Remove from favorites" } else { "Add to favorites" };
+                                    menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                        state.read(cx).send(signal_backend::Command::SetStickerFavorite {
+                                            pack_id: pack.id.clone(),
+                                            pack_key: pack.key.clone(),
+                                            sticker_id,
+                                            favorite: !favorite,
+                                        })
+                                    }))
+                                }
+                            });
+                            let cell = div()
                                 .id(SharedString::from(format!("sticker-{section_ix}-{ix}")))
                                 .size(px(STICKER_CELL))
                                 .p_1p5()
@@ -483,7 +533,11 @@ impl EmojiPicker {
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.emit(PickerEvent::Sticker(pack.clone(), sticker.clone()))
                                 }))
-                                .child(img(path).size_full().object_fit(ObjectFit::Contain))
+                                .child(img(path).size_full().object_fit(ObjectFit::Contain));
+                            match menu {
+                                Some(menu) => cell.context_menu(menu).into_any_element(),
+                                None => cell.into_any_element(),
+                            }
                         },
                     )))
             }))
@@ -966,6 +1020,60 @@ mod tests {
             vec![("Recently used".to_owned(), vec![2]), ("Pack".to_owned(), vec![0, 1, 2])]
         );
         backend.shutdown();
+    }
+
+    #[gpui_kit::test]
+    fn favorite_stickers_come_first_from_any_pack(cx: &mut TestAppContext) {
+        use crate::views::test_support::{demo, wait};
+        use signal_backend::Command;
+        let (_backend, state, mut cx, _dir) = demo(cx);
+        state.read_with(&cx, |s, _| {
+            s.send(Command::LoadStickers);
+            s.send(Command::LoadStickerManager);
+        });
+        wait(&mut cx, "the demo's packs and config", &mut |cx| {
+            cx.read(|cx| {
+                let s = state.read(cx);
+                s.sticker_packs.len() == 1 && s.sticker_manager.is_some() && s.remote_config().sticker_favorites()
+            })
+        });
+        // Demo shapes is installed; Garden dots isn't.
+        let (shapes, garden) = cx.read(|cx| {
+            let s = state.read(cx);
+            let received = &s.sticker_manager.as_ref().unwrap().received;
+            (s.sticker_packs[0].clone(), received.iter().find(|p| !p.installed).unwrap().clone())
+        });
+        let favorite = |id: &[u8], key: &[u8], sticker_id, favorite| Command::SetStickerFavorite {
+            pack_id: id.to_vec(),
+            pack_key: key.to_vec(),
+            sticker_id,
+            favorite,
+        };
+        state.read_with(&cx, |s, _| s.send(favorite(&shapes.id, &shapes.key, 1, true)));
+        wait(&mut cx, "the first favorite", &mut |cx| cx.read(|cx| state.read(cx).favorite_stickers.len() == 1));
+        state.read_with(&cx, |s, _| s.send(favorite(&garden.id, &garden.key, 0, true)));
+        wait(&mut cx, "the second favorite", &mut |cx| cx.read(|cx| state.read(cx).favorite_stickers.len() == 2));
+
+        let picker = cx.update(|window, cx| cx.new(|cx| EmojiPicker::new(state.clone(), window, cx)));
+        let sections = cx.read(|cx| picker.read(cx).sticker_sections(cx));
+        assert_eq!(sections[0].0.as_ref(), "Favorites");
+        let mut favorites: Vec<_> = sections[0].1.iter().map(|(pack, s)| (pack.id.clone(), s.id)).collect();
+        favorites.sort();
+        let mut expected = vec![(shapes.id.clone(), 1), (garden.id.clone(), 0)];
+        expected.sort();
+        assert_eq!(favorites, expected);
+        // The uninstalled pack's favorite sends with its own pack and key.
+        let (pack, _) = sections[0].1.iter().find(|(pack, _)| pack.id == garden.id).unwrap();
+        assert_eq!(pack.key, garden.key);
+        assert_eq!(sections[1].0.as_ref(), "Demo shapes");
+
+        // Unfavorited: gone, and no Favorites section once it's empty.
+        state.read_with(&cx, |s, _| s.send(favorite(&garden.id, &garden.key, 0, false)));
+        wait(&mut cx, "the removal", &mut |cx| cx.read(|cx| state.read(cx).favorite_stickers.len() == 1));
+        state.read_with(&cx, |s, _| s.send(favorite(&shapes.id, &shapes.key, 1, false)));
+        wait(&mut cx, "the second removal", &mut |cx| cx.read(|cx| state.read(cx).favorite_stickers.is_empty()));
+        let sections = cx.read(|cx| picker.read(cx).sticker_sections(cx));
+        assert_eq!(sections[0].0.as_ref(), "Demo shapes");
     }
 
     #[gpui_kit::test]

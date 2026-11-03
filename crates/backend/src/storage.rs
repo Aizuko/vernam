@@ -105,6 +105,8 @@ pub(crate) struct StorageSnapshot {
     pub chat_folders: Vec<signal_store::ChatFolder>,
     /// Installed (and uninstalled) sticker packs.
     pub sticker_packs: Vec<StorageStickerPack>,
+    /// Favorite stickers, and their tombstones.
+    pub favorite_stickers: Vec<signal_store::RemoteFavoriteSticker>,
 }
 
 /// An `InstalledStickerPackRecord` (Desktop's `mergeInstalledStickerPackRecord`).
@@ -129,6 +131,22 @@ fn sticker_pack(record: &presage::proto::InstalledStickerPackRecord) -> Option<S
         return None;
     }
     Some(StorageStickerPack { id: record.pack_id.clone(), key, position: record.position, deleted_at })
+}
+
+/// A `FavoriteStickerRecord` (Desktop's `mergeFavoriteStickerRecord`): a
+/// record without a pack id is skipped (Desktop throws); one without a key
+/// is kept for the merge to skip unless it's a tombstone.
+fn favorite_sticker(record: &presage::proto::FavoriteStickerRecord) -> Option<signal_store::RemoteFavoriteSticker> {
+    if record.pack_id.is_empty() {
+        return None;
+    }
+    Some(signal_store::RemoteFavoriteSticker {
+        pack_id: hex::encode(&record.pack_id),
+        sticker_id: record.sticker_id,
+        pack_key: Some(hex::encode(&record.pack_key)).filter(|_| !record.pack_key.is_empty()),
+        favorited_at: clamp_millis(record.favorited_at_timestamp),
+        deleted_at: clamp_millis(record.deleted_at_timestamp),
+    })
 }
 
 /// What the account record says about our profile and username (Desktop's
@@ -240,6 +258,7 @@ pub(crate) async fn fetch(manager: &SignalManager) -> anyhow::Result<StorageSnap
                     | IdentifierType::CallLink
                     | IdentifierType::ChatFolder
                     | IdentifierType::StickerPack
+                    | IdentifierType::FavoriteStickerPack
             )
         })
         .map(|id| id.raw.clone())
@@ -293,6 +312,10 @@ pub(crate) async fn fetch(manager: &SignalManager) -> anyhow::Result<StorageSnap
                 Some(Record::CallLink(link)) => snapshot.call_links.extend(call_link(&link)),
                 Some(Record::ChatFolder(folder)) => snapshot.chat_folders.extend(chat_folder(&folder)),
                 Some(Record::InstalledStickerPack(pack)) => snapshot.sticker_packs.extend(sticker_pack(&pack)),
+                Some(Record::Sticker(favorite)) => match favorite_sticker(&favorite) {
+                    Some(favorite) => snapshot.favorite_stickers.push(favorite),
+                    None => tracing::warn!(sticker = favorite.sticker_id, "skipping a favorite sticker record without a pack id"),
+                },
                 _ => {}
             }
         }
@@ -1007,6 +1030,88 @@ pub(crate) async fn write_sticker_pack(manager: &SignalManager, id: &[u8], key: 
     bail!("storage kept changing on another device; try again")
 }
 
+const RECORD_FAVORITE_STICKER: u32 = 11; // StorageRecord.sticker
+const FAVORITE_KEY: u32 = 2;
+const FAVORITE_STICKER_ID: u32 = 3;
+const FAVORITE_AT: u32 = 4;
+const FAVORITE_DELETED_AT: u32 = 5;
+
+/// Sets a favorite sticker record (Desktop's `toFavoriteStickerPackRecord`):
+/// its pack key and when it was favorited, or (unfavorited at `deleted_at`)
+/// neither, keeping its pack and sticker ids and fields this client doesn't
+/// know. `Ok(None)` when nothing changes.
+pub(crate) fn edit_favorite_sticker(record: &[u8], key: &[u8], favorited_at: u64, deleted_at: u64) -> anyhow::Result<Option<Vec<u8>>> {
+    edit_inner(record, RECORD_FAVORITE_STICKER, |inner| {
+        let fields = wire::fields(inner).context("malformed favorite sticker record")?;
+        let mut out = Vec::with_capacity(inner.len() + 48);
+        for field in fields.iter().filter(|f| !matches!(f.number, FAVORITE_KEY | FAVORITE_AT | FAVORITE_DELETED_AT)) {
+            out.extend_from_slice(field.raw);
+        }
+        if deleted_at == 0 {
+            wire::put_len(&mut out, FAVORITE_KEY, key);
+            wire::put_varint_field(&mut out, FAVORITE_AT, favorited_at);
+        } else {
+            wire::put_varint_field(&mut out, FAVORITE_DELETED_AT, deleted_at);
+        }
+        let decode = |bytes: &[u8]| presage::proto::FavoriteStickerRecord::decode(bytes).ok();
+        let same = decode(inner).zip(decode(&out)).is_some_and(|(old, new)| {
+            (old.pack_key, old.favorited_at_timestamp, old.deleted_at_timestamp)
+                == (new.pack_key, new.favorited_at_timestamp, new.deleted_at_timestamp)
+        });
+        Ok((!same).then_some(out))
+    })
+}
+
+fn new_favorite_sticker_record(pack_id: &[u8], sticker_id: u32) -> Vec<u8> {
+    let mut inner = Vec::new();
+    wire::put_len(&mut inner, 1, pack_id);
+    if sticker_id != 0 {
+        wire::put_varint_field(&mut inner, FAVORITE_STICKER_ID, u64::from(sticker_id));
+    }
+    let mut record = Vec::new();
+    wire::put_len(&mut record, RECORD_FAVORITE_STICKER, &inner);
+    record
+}
+
+/// Saves a favorite sticker (or, with `deleted_at`, its tombstone) for the
+/// whole account, adding its record if Storage Service has none.
+pub(crate) async fn write_favorite_sticker(
+    manager: &SignalManager,
+    pack_id: &[u8],
+    sticker_id: u32,
+    key: &[u8],
+    favorited_at: u64,
+    deleted_at: u64,
+) -> anyhow::Result<()> {
+    let session = Session::new(manager).await?;
+    let kind = IdentifierType::FavoriteStickerPack;
+    for _ in 0..3 {
+        let manifest = session.manifest().await?;
+        let ikm = manifest_ikm(&manifest);
+        let keys: Vec<Vec<u8>> =
+            manifest.identifiers.iter().filter(|k| k.r#type() == kind).map(|k| k.raw.clone()).collect();
+        let mut existing = None;
+        for batch in keys.chunks(READ_BATCH) {
+            existing = session.read_many(batch, ikm).await?.into_iter().find(|(_, raw)| {
+                matches!(StorageRecord::decode(raw.as_slice()), Ok(StorageRecord { record: Some(Record::Sticker(f)) })
+                    if f.pack_id == pack_id && f.sticker_id == sticker_id)
+            });
+            if existing.is_some() {
+                break;
+            }
+        }
+        let (old_key, record) = match existing {
+            Some((k, raw)) => (Some(k), raw),
+            None => (None, new_favorite_sticker_record(pack_id, sticker_id)),
+        };
+        let Some(record) = edit_favorite_sticker(&record, key, favorited_at, deleted_at)? else { return Ok(()) };
+        if session.commit(manager, &manifest, old_key.as_deref(), kind, &record).await? {
+            return Ok(());
+        }
+    }
+    bail!("storage kept changing on another device; try again")
+}
+
 const RECORD_CHAT_FOLDER: u32 = 8; // StorageRecord.chatFolder
 /// ChatFolderRecord's fields after its id (1): name (2) to
 /// deletedAtTimestampMs (11).
@@ -1384,17 +1489,8 @@ impl Session {
     ) -> anyhow::Result<bool> {
         let ikm = manifest_ikm(manifest);
         let new_key: [u8; 16] = rand::rng().random();
-        let mut next = manifest.clone();
-        next.version += 1;
-        next.source_device = manager.registration_data().device_id.unwrap_or_default();
-        match old_key {
-            Some(old_key) => {
-                for id in next.identifiers.iter_mut().filter(|id| id.raw == old_key) {
-                    id.raw = new_key.to_vec();
-                }
-            }
-            None => next.identifiers.push(Identifier { raw: new_key.to_vec(), r#type: kind as i32 }),
-        }
+        let device = manager.registration_data().device_id.unwrap_or_default();
+        let next = next_manifest(manifest, old_key, &new_key, kind, device);
         let item_key = item_key(&self.key, &new_key, ikm);
         let write = WriteOperation {
             manifest: Some(StorageService::encrypt_manifest(&self.key, &next)),
@@ -1414,6 +1510,26 @@ impl Session {
         response.error_for_status()?;
         Ok(true)
     }
+}
+
+/// The manifest after a write: the next version, from `device`, with
+/// `old_key`'s identifier (or a new one of `kind`) under `new_key`. Every
+/// other identifier stays as it was, those of record types this client
+/// doesn't read too (prost keeps an enum value it doesn't know as its
+/// number).
+fn next_manifest(manifest: &ManifestRecord, old_key: Option<&[u8]>, new_key: &[u8], kind: IdentifierType, device: u32) -> ManifestRecord {
+    let mut next = manifest.clone();
+    next.version += 1;
+    next.source_device = device;
+    match old_key {
+        Some(old_key) => {
+            for id in next.identifiers.iter_mut().filter(|id| id.raw == old_key) {
+                id.raw = new_key.to_vec();
+            }
+        }
+        None => next.identifiers.push(Identifier { raw: new_key.to_vec(), r#type: kind as i32 }),
+    }
+    next
 }
 
 // Same derivations as libsignal-service's `StorageService` (private there).
@@ -2204,6 +2320,67 @@ mod tests {
         assert!(wire::fields(&inner).unwrap().iter().any(|f| f.number == 99), "unknown field kept");
         // Installed without a key: not a pack Desktop would take.
         assert_eq!(sticker_pack(&presage::proto::InstalledStickerPackRecord { pack_id: id, ..Default::default() }), None);
+    }
+
+    #[test]
+    fn favorite_sticker_records_read_and_write_as_desktops() {
+        let (id, key) = (vec![0xab; 16], vec![0xcd; 32]);
+        let read = |bytes: &[u8]| match StorageRecord::decode(bytes).unwrap().record {
+            Some(Record::Sticker(favorite)) => favorite,
+            other => panic!("{other:?}"),
+        };
+        // A new record, with a field this client doesn't know.
+        let new = new_favorite_sticker_record(&id, 7);
+        let mut inner = wire::fields(&new).unwrap()[0].payload.unwrap().to_vec();
+        wire::put_varint_field(&mut inner, 99, 1);
+        let mut record = Vec::new();
+        wire::put_len(&mut record, RECORD_FAVORITE_STICKER, &inner);
+
+        let favorited = edit_favorite_sticker(&record, &key, 1234, 0).unwrap().expect("changed");
+        assert!(edit_favorite_sticker(&favorited, &key, 1234, 0).unwrap().is_none());
+        assert_eq!(
+            favorite_sticker(&read(&favorited)),
+            Some(signal_store::RemoteFavoriteSticker {
+                pack_id: hex::encode(&id),
+                sticker_id: 7,
+                pack_key: Some(hex::encode(&key)),
+                favorited_at: 1234,
+                deleted_at: 0,
+            })
+        );
+        // Unfavorited: no key, no time favorited, when (Desktop's record).
+        let removed = edit_favorite_sticker(&favorited, &key, 1234, 500).unwrap().expect("changed");
+        let favorite = read(&removed);
+        assert!(favorite.pack_key.is_empty() && favorite.favorited_at_timestamp == 0 && favorite.deleted_at_timestamp == 500);
+        assert_eq!((favorite.pack_id, favorite.sticker_id), (id.clone(), 7));
+        let inner = wire::fields(&removed).unwrap()[0].payload.unwrap().to_vec();
+        assert!(wire::fields(&inner).unwrap().iter().any(|f| f.number == 99), "unknown field kept");
+        // Sticker 0 reads back as 0; without a pack id, skipped.
+        assert_eq!(read(&new_favorite_sticker_record(&id, 0)).sticker_id, 0);
+        assert_eq!(favorite_sticker(&presage::proto::FavoriteStickerRecord { sticker_id: 3, ..Default::default() }), None);
+    }
+
+    #[test]
+    fn manifest_writes_keep_identifiers_of_every_record_type() {
+        // Types 10 and 11 (hidden and favorite sticker packs) and one no
+        // client knows yet, as the server would send them.
+        let mut bytes = Vec::new();
+        for (raw, kind) in [([1u8; 16], 10u64), ([2; 16], 11), ([3; 16], 42), ([4; 16], 1)] {
+            let mut identifier = Vec::new();
+            wire::put_len(&mut identifier, 1, &raw);
+            wire::put_varint_field(&mut identifier, 2, kind);
+            wire::put_len(&mut bytes, 2, &identifier);
+        }
+        wire::put_varint_field(&mut bytes, 1, 7);
+        let manifest = ManifestRecord::decode(bytes.as_slice()).unwrap();
+        let next = next_manifest(&manifest, Some(&[4; 16]), &[5; 16], IdentifierType::Contact, 2);
+        let next = ManifestRecord::decode(next.encode_to_vec().as_slice()).unwrap();
+        let kinds: Vec<(u8, i32)> = next.identifiers.iter().map(|id| (id.raw[0], id.r#type)).collect();
+        assert_eq!(kinds, vec![(1, 10), (2, 11), (3, 42), (5, 1)]);
+        assert_eq!((next.version, next.source_device), (8, 2));
+        let added = next_manifest(&manifest, None, &[6; 16], IdentifierType::FavoriteStickerPack, 2);
+        assert_eq!(added.identifiers.len(), 5);
+        assert_eq!(added.identifiers[4].r#type, 11);
     }
 
     #[test]

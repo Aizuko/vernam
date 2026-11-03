@@ -120,6 +120,13 @@ impl RemoteConfig {
         self.feature("stickerReply.send")
     }
 
+    /// Favorite stickers in the picker and their Storage Service records
+    /// (`stickerFavorites`, Desktop's `isFavoriteStickersEnabled`,
+    /// `ts/util/stickers.preload.ts`).
+    pub fn sticker_favorites(&self) -> bool {
+        self.feature("stickerFavorites")
+    }
+
     /// Setting our own member label in a group (`groupMemberLabels.edit`).
     pub fn group_member_labels_edit(&self) -> bool {
         self.feature("groupMemberLabels.edit")

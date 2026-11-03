@@ -364,6 +364,8 @@ pub struct AppState {
     posters: HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
     /// Recently sent stickers, newest first: (pack id, sticker id).
     pub recent_stickers: Vec<(Vec<u8>, u32)>,
+    /// Favorite stickers, newest first (shown when `stickerFavorites` is on).
+    pub favorite_stickers: Vec<signal_backend::FavoriteStickerView>,
     /// How images are optimized before sending (our setting, not Signal's).
     pub image_optimization: signal_backend::media::Optimization,
     /// Settings' other values (theme, zoom, the account's on/off settings).
@@ -565,6 +567,7 @@ impl AppState {
             waveforms: HashMap::new(),
             posters: HashMap::new(),
             recent_stickers: Vec::new(),
+            favorite_stickers: Vec::new(),
             reload_task: None,
             reload_pending: false,
             auto_select: std::env::var_os("SIGNAL_GPUI_DEMO").is_some(),
@@ -1267,6 +1270,10 @@ impl AppState {
                 }
                 cx.notify();
             }
+            Event::FavoriteStickers(favorites) => {
+                self.favorite_stickers = favorites;
+                cx.notify();
+            }
             Event::StickerManager(view) => {
                 self.sticker_manager = Some(view);
                 cx.notify();
@@ -1368,6 +1375,7 @@ impl AppState {
                 self.typing.clear();
                 self.emoji_usage = EmojiUsageCache::default();
                 self.recent_stickers.clear();
+                self.favorite_stickers.clear();
                 self.sticker_packs.clear();
                 self.sticker_manager = None;
                 self.sticker_preview = None;

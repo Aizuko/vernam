@@ -18,6 +18,7 @@ made-up config; the fetch hasn't been run against Signal's server.
 |---|---|---|
 | `adminDelete.receive` / `.send` | Group admins deleting anyone's message for everyone. | Done, following both flags. People whose clients don't know `adminDelete` yet still see the message. |
 | `stickerReply.send` | Sending a sticker as a reply (with a quote). | Done, following the flag. GIFs reply too; Desktop opens a dialog to caption a GIF with the draft first (`DraftGifMessageSendModal`), and here a GIF goes at once, so the draft and the reply stay in the composer, as for a sticker. |
+| `stickerFavorites` | Favorite stickers: a Favorites section first in the sticker picker (Desktop commit 8e3dc06). | Follows the flag for the picker: its section, and "Add to favorites" / "Remove from favorites" in a sticker's right-click menu (Desktop has `markStickerAsFavorite` but no control for it yet). Records are read, merged and written again whatever the flag, as Desktop's storage sync does. See "Sticker manager" below. |
 | `pollSend1to1` | Creating polls in 1:1 chats (groups always have polls). | Follows the flag. Received 1:1 polls show and can be voted in either way. |
 | `shareContact` | Sharing one of your contacts from the composer's add menu ("Contact", `ShareContactDialog`). | Done, following the flag: the picker (Signal connections with a name and account or a number, and anyone else with a number), the share step with the number, nickname and note to check, "Edit name" and "Select a photo", sent as Desktop's `enqueueSharedContactForSend` builds it, photo uploaded with it (`signal_backend::share_contact`). Differences: an address-book name is kept here as one string, so it goes as the first name; there are no address-book photos, only the profile photo; nobody is left out for being unregistered (not tracked); the search is a plain match on name and number rather than Desktop's fuzzy one; no safety-number check before sending (as for polls). Unit and headless UI tested against the demo; not sent to a real account. |
 | `groupMemberLabels.edit` | Editing your own member label in a group. | Done (Group settings), following the flag: whether you may set one follows the group's label access, as Desktop's `getCanAddLabel`. |
@@ -760,4 +761,34 @@ run against Signal's servers (manifests, covers, the record writes). Left:
 - **Desktop's manager is a chat panel** with a segmented header; here it's
   a dialog with two tab buttons. Recent stickers of an uninstalled pack
   aren't cleared.
+
+### Favorite stickers
+
+Following Desktop commit 8e3dc06 (`ts/sql/server/stickers.std.ts`,
+`mergeFavoriteStickerRecord`, `FunPanelStickers`): favorites (at most 500)
+are kept in the `sticker_favorites` setting as JSON, with tombstones for
+unfavorited ones; each change writes its `FavoriteStickerRecord`, and
+Storage Service's records are merged at each sync (tombstones older than
+the message queue time dropped, newest favorites over 500 rejected). A
+favorite from a pack that isn't installed has its sticker downloaded on its
+own (`stickers/favorites/`, at most 24 each time). Tested with store,
+merge, wire-format and manifest tests and a demo-mode UI test; no record
+has been written to or read from Signal's servers. Differences:
+
+- **Pending writes:** a change whose write failed is written again at the
+  next sync (at most 20 a sync), and a favorite the manifest lacks is
+  written again, as Desktop re-uploads it. Since every record is read each
+  sync, a remote record can't be told from one merged before, so a local
+  change not yet written wins over the remote record until it's written.
+- **Favoriting again** an unfavorited sticker revives its tombstone;
+  Desktop's `createFavoriteStickerFromStickerRef` returns the tombstone
+  and does nothing.
+- **Aged-out tombstones** are dropped here but their records stay in
+  Storage Service; Desktop deletes them from the manifest.
+- **Hidden sticker packs** (`HiddenStickerPackRecord`, type 10) aren't
+  read: Desktop doesn't read them yet either (not in `validRecordTypes`).
+  Their identifiers, like every other type's, are kept when we rewrite
+  the manifest.
+- **Search** doesn't look in favorites from packs that aren't installed,
+  as in Desktop, and "Move to top" isn't offered (Desktop has none yet).
 

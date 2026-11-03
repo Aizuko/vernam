@@ -2865,3 +2865,49 @@ async fn sticker_packs_are_known_installed_and_ordered() {
     let aa = db.sticker_pack_rows().await.unwrap().into_iter().find(|r| r.id == "aa").unwrap();
     assert_eq!((aa.installed, aa.position, aa.uninstalled_at), (false, None, Some(9)));
 }
+
+#[tokio::test]
+async fn favorite_stickers_are_kept_unfavorited_and_written() {
+    let db = test_db().await;
+    let Favorited::Added(added) = db.favorite_sticker("aa", "k1", 3, 10).await.unwrap() else { panic!("not added") };
+    assert!(added.needs_sync);
+    assert_eq!(db.favorite_sticker("aa", "k1", 3, 11).await.unwrap(), Favorited::Already);
+    db.favorite_sticker("bb", "k2", 1, 20).await.unwrap();
+    let ids = |favorites: Vec<FavoriteSticker>| favorites.iter().map(|f| (f.pack_id.clone(), f.sticker_id, f.is_active())).collect::<Vec<_>>();
+    assert_eq!(ids(db.favorite_stickers().await.unwrap()), vec![("bb".into(), 1, true), ("aa".into(), 3, true)]);
+
+    // Written: no longer pending. A write of an older state leaves a
+    // newer change pending.
+    db.favorite_sticker_written(&added).await.unwrap();
+    assert!(!db.favorite_stickers().await.unwrap()[1].needs_sync);
+    assert!(db.set_favorite_sticker_image("aa", 3, "img/3.webp", Some("🔥")).await.unwrap());
+    let old = db.unfavorite_sticker("aa", 3, 30).await.unwrap().unwrap();
+    assert_eq!(old.path.as_deref(), Some("img/3.webp"));
+    assert_eq!(db.unfavorite_sticker("aa", 3, 31).await.unwrap(), None, "already a tombstone");
+    db.favorite_sticker_written(&added).await.unwrap();
+    let tombstone = db.favorite_stickers().await.unwrap().into_iter().find(|f| f.pack_id == "aa").unwrap();
+    assert_eq!((tombstone.deleted_at, tombstone.needs_sync, tombstone.pack_key, tombstone.path), (Some(30), true, None, None));
+    assert!(!db.set_favorite_sticker_image("aa", 3, "img/x", None).await.unwrap(), "not a favorite now");
+
+    // Favorited again, from its tombstone.
+    assert!(matches!(db.favorite_sticker("aa", "k1", 3, 40).await.unwrap(), Favorited::Added(_)));
+    assert_eq!(ids(db.favorite_stickers().await.unwrap()), vec![("aa".into(), 3, true), ("bb".into(), 1, true)]);
+
+    // Storage Service's records merge in.
+    let remote = [RemoteFavoriteSticker { pack_id: "cc".into(), sticker_id: 9, pack_key: Some("k3".into()), favorited_at: 50, deleted_at: 0 }];
+    let merge = db.merge_storage_favorites(&remote, 0).await.unwrap();
+    assert!(merge.changed);
+    assert_eq!(db.favorite_stickers().await.unwrap()[0].pack_id, "cc");
+}
+
+#[tokio::test]
+async fn favorite_stickers_stop_at_the_limit() {
+    let db = test_db().await;
+    let remote: Vec<_> = (0..FAVORITE_STICKER_LIMIT as u32)
+        .map(|i| RemoteFavoriteSticker { pack_id: "aa".into(), sticker_id: i, pack_key: Some("k".into()), favorited_at: 1, deleted_at: 0 })
+        .collect();
+    db.merge_storage_favorites(&remote, 0).await.unwrap();
+    assert_eq!(db.favorite_sticker("bb", "k", 1, 5).await.unwrap(), Favorited::Full);
+    db.unfavorite_sticker("aa", 0, 6).await.unwrap();
+    assert!(matches!(db.favorite_sticker("bb", "k", 1, 7).await.unwrap(), Favorited::Added(_)));
+}

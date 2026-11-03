@@ -10,6 +10,7 @@ mod early;
 mod group_admin;
 mod group_calls;
 mod polls;
+mod sticker_favorites;
 mod stickers;
 mod stories;
 mod sender_keys;
@@ -475,6 +476,8 @@ struct Actor {
     identities_seen: RefCell<HashMap<String, String>>,
     /// A later batch of profile photo checks is scheduled.
     avatar_batch_pending: std::cell::Cell<bool>,
+    /// Favorite stickers' own downloads (`sticker_favorites.rs`).
+    favorite_downloads: sticker_favorites::FavoriteDownloads,
     /// The history transfer after linking, while it can still be skipped
     /// (taken once the import starts).
     history: RefCell<Option<tokio::task::JoinHandle<()>>>,
@@ -606,6 +609,7 @@ pub(crate) async fn run(
         call_sends,
         video,
         avatar_batch_pending: std::cell::Cell::new(false),
+        favorite_downloads: Default::default(),
         history: RefCell::new(None),
         outbound,
         linking: RefCell::new(false),
@@ -913,6 +917,7 @@ impl Actor {
                 Command::LoadStickers => {
                     let packs = self.load_stickers().await;
                     self.emit(Event::Stickers(packs));
+                    self.favorite_stickers_changed().await;
                 }
                 Command::LoadStickerManager => self.load_sticker_manager().await,
                 Command::PreviewStickerPack { id, key } => self.preview_sticker_pack(id, key).await,
@@ -923,6 +928,9 @@ impl Actor {
                 Command::InstallStickerPack { id, key } => self.install_sticker_pack_ui(id, key).await,
                 Command::UninstallStickerPack { id, key } => self.uninstall_sticker_pack_ui(id, key).await,
                 Command::OrderStickerPacks(ids) => self.order_sticker_packs(ids).await,
+                Command::SetStickerFavorite { pack_id, pack_key, sticker_id, favorite } => {
+                    self.set_sticker_favorite(pack_id, pack_key, sticker_id, favorite).await
+                }
                 Command::SendSticker { conversation, pack, sticker, quote } => {
                     self.send_sticker(conversation, &pack, sticker, quote).await
                 }
@@ -2655,6 +2663,8 @@ impl Actor {
     /// Reads names, profile keys, pins and archived/muted state from the
     /// Storage Service, then re-titles.
     async fn sync_storage(self: &Rc<Self>, manager: &SignalManager) {
+        // Favorites changed after this point are newer than the snapshot.
+        let favorite_changes = self.favorite_downloads.local_changes.get();
         let storage::StorageSnapshot {
             contacts,
             pinned,
@@ -2673,6 +2683,7 @@ impl Actor {
             own_profile,
             chat_folders,
             sticker_packs,
+            favorite_stickers,
         } = match storage::fetch(manager).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -2709,6 +2720,7 @@ impl Actor {
         self.apply_storage_call_links(call_links).await;
         self.apply_storage_chat_folders(chat_folders).await;
         self.apply_storage_sticker_packs(sticker_packs).await;
+        self.apply_storage_favorite_stickers(favorite_stickers, favorite_changes).await;
         if let Err(error) = self.db.apply_profile_sharing(&profile_sharing).await {
             warn!(error = %format!("{error:#}"), "failed to save profile sharing");
         }
@@ -2881,13 +2893,24 @@ impl Actor {
             return self.error("can't send sticker", "sticker image is missing");
         };
         let (kind, width, height) = media::probe(&bytes).unwrap_or((media::ImageKind::Webp, 512, 512));
+        // A favorite from a pack that isn't installed has the only copy of
+        // its image, which goes when it's unfavorited: the message keeps
+        // its own.
+        let mut path = sticker.path.clone();
+        if path.starts_with(self.config.data_dir.join("stickers").join("favorites")) {
+            let copy = self.config.data_dir.join("attachments").join(share_contact::copy_name("sticker", kind.extension()));
+            if let Err(error) = tokio::fs::write(&copy, &bytes).await {
+                return self.error("can't send sticker", error);
+            }
+            path = copy;
+        }
         let meta = AttachmentMeta {
             content_type: kind.content_type().into(),
             file_name: None,
             size: bytes.len() as u64,
             width: Some(width),
             height: Some(height),
-            local_path: Some(sticker.path.to_string_lossy().into_owned()),
+            local_path: Some(path.to_string_lossy().into_owned()),
             sticker: true,
             gif: false,
             voice: false,
@@ -2906,7 +2929,7 @@ impl Actor {
             emoji: sticker.emoji,
             data: None,
         });
-        self.enqueue(Outbound::SendSticker { conversation, body: data, timestamp, message: id, path: sticker.path });
+        self.enqueue(Outbound::SendSticker { conversation, body: data, timestamp, message: id, path });
     }
 
     /// A username or phone number, looked up on Signal's servers.

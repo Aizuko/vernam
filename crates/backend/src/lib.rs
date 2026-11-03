@@ -365,6 +365,10 @@ pub enum Command {
     /// Installed packs in this order (Desktop's drag to reorder), saved for
     /// our other devices.
     OrderStickerPacks(Vec<Vec<u8>>),
+    /// Favorites a sticker, or unfavorites it, here and on our other
+    /// devices (its `FavoriteStickerRecord`; Desktop's
+    /// `markStickerAsFavorite`). The pack needn't be installed.
+    SetStickerFavorite { pack_id: Vec<u8>, pack_key: Vec<u8>, sticker_id: u32, favorite: bool },
     /// Uploads a new sticker pack and installs it; answered with
     /// `Event::StickerUpload`.
     UploadStickerPack(sticker_upload::NewStickerPack),
@@ -841,6 +845,14 @@ pub struct StickerView {
     pub path: std::path::PathBuf,
 }
 
+/// A favorite sticker whose image we have, from an installed pack or not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FavoriteStickerView {
+    pub pack_id: Vec<u8>,
+    pub pack_key: Vec<u8>,
+    pub sticker: StickerView,
+}
+
 /// A story to post.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutgoingStory {
@@ -1174,6 +1186,9 @@ pub enum Event {
     Gifs { query: String, offset: u32, result: Result<GifResults, String> },
     /// Installed sticker packs (answer to `Command::LoadStickers`).
     Stickers(Vec<StickerPackView>),
+    /// Favorite stickers, newest first (with `Event::Stickers`, and when
+    /// they change).
+    FavoriteStickers(Vec<FavoriteStickerView>),
     /// How a `Command::UploadStickerPack` is going.
     StickerUpload(sticker_upload::StickerUpload),
     /// What the sticker manager lists (answer to `Command::LoadStickerManager`).

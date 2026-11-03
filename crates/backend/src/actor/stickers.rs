@@ -33,7 +33,7 @@ impl Actor {
     }
 
     /// Writes a sticker's image once, named by the kind it is.
-    fn save_sticker_image(dir: &Path, id: u32, bytes: &[u8]) -> Option<PathBuf> {
+    pub(super) fn save_sticker_image(dir: &Path, id: u32, bytes: &[u8]) -> Option<PathBuf> {
         std::fs::create_dir_all(dir).ok()?;
         let ext = media::ImageKind::sniff(bytes).map_or("webp", |k| k.extension());
         let path = dir.join(format!("{id}.{ext}"));
@@ -291,9 +291,12 @@ impl Actor {
         self.stickers_changed().await;
     }
 
-    pub(super) async fn stickers_changed(&self) {
+    pub(super) async fn stickers_changed(self: &Rc<Self>) {
         self.emit(Event::Stickers(self.load_stickers().await));
         self.emit(Event::StickerManager(self.sticker_manager_view().await));
+        // Favorites follow their pack: an uninstalled pack's need their
+        // own images.
+        self.favorite_stickers_changed().await;
     }
 
     /// Storage Service's packs (Desktop's `mergeInstalledStickerPackRecord`):
