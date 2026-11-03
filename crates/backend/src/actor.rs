@@ -3877,6 +3877,12 @@ impl Actor {
             .filter(|m| m.notice.is_none())
             .collect();
         self.remove_conversation(&conversation).await;
+        // The Signal chat's notes arrive on each device by itself, and its
+        // made-up account means nothing to the others (Desktop's
+        // `ConversationModel.destroyMessages`, `isSignalConversation`).
+        if conversation.is_signal() {
+            return;
+        }
         let Some(identifier) = Self::conversation_identifier(&conversation) else { return };
         let most_recent: Vec<_> = recent.iter().rev().take(5).map(|m| self.addressable(m)).collect();
         let delete = if most_recent.is_empty() {
