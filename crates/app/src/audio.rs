@@ -274,10 +274,16 @@ pub fn waveform(path: &Path) -> anyhow::Result<(Vec<f32>, f64)> {
     }
 }
 
-/// "0:07", "1:05": a time as Desktop shows it beside the waveform.
+/// "0:07", "1:05", "1:00:00": a time as Desktop shows it beside the
+/// waveform and under a video, with hours from an hour on
+/// (`ts/util/formatDuration.std.ts`).
 pub fn clock(seconds: f64) -> String {
     let seconds = seconds.max(0.).round() as u64;
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    if seconds >= 3600 {
+        format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
 }
 
 #[cfg(test)]
@@ -291,6 +297,7 @@ mod tests {
         assert_eq!(next_rate(0.5), 1.);
         assert_eq!((rate_label(1.5), rate_label(1.)), ("1.5×".into(), "1×".into()));
         assert_eq!((clock(7.4), clock(65.)), ("0:07".into(), "1:05".into()));
+        assert_eq!((clock(3599.), clock(3600.), clock(3907.)), ("59:59".into(), "1:00:00".into(), "1:05:07".into()));
     }
 
     #[test]
