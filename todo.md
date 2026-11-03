@@ -19,6 +19,7 @@ made-up config; the fetch hasn't been run against Signal's server.
 | `adminDelete.receive` / `.send` | Group admins deleting anyone's message for everyone. | Done, following both flags. People whose clients don't know `adminDelete` yet still see the message. |
 | `stickerReply.send` | Sending a sticker as a reply (with a quote). | Done, following the flag. GIFs reply too; Desktop opens a dialog to caption a GIF with the draft first (`DraftGifMessageSendModal`), and here a GIF goes at once, so the draft and the reply stay in the composer, as for a sticker. |
 | `pollSend1to1` | Creating polls in 1:1 chats (groups always have polls). | Follows the flag. Received 1:1 polls show and can be voted in either way. |
+| `shareContact` | Sharing one of your contacts from the composer's add menu ("Contact", `ShareContactDialog`). | Done, following the flag: the picker (Signal connections with a name and account or a number, and anyone else with a number), the share step with the number, nickname and note to check, "Edit name" and "Select a photo", sent as Desktop's `enqueueSharedContactForSend` builds it, photo uploaded with it (`signal_backend::share_contact`). Differences: an address-book name is kept here as one string, so it goes as the first name; there are no address-book photos, only the profile photo; nobody is left out for being unregistered (not tracked); the search is a plain match on name and number rather than Desktop's fuzzy one; no safety-number check before sending (as for polls). Unit and headless UI tested against the demo; not sent to a real account. |
 | `groupMemberLabels.edit` | Editing your own member label in a group. | Done (Group settings), following the flag: whether you may set one follows the group's label access, as Desktop's `getCanAddLabel`. |
 | `groupTerminate.send` | Admins ending a group for everyone. | Done (Group settings, "End group"), following the flag. A group ended by someone else (received, synced, or in a transferred backup) blocks sending and the rest, as Desktop. Ending a group on Signal's group server hasn't been tried. |
 | `binaryServiceId` | Service ids in the binary proto fields (`*Binary`) instead of strings. | Done for the messages and sync messages we build: only the binary fields with the flag on, only the strings without, as Desktop's `SendMessage.preload.ts`. Sent transcripts built in libsignal-service-rs and the Storage Service records we write (contacts, story lists, pins) carry both forms, which every client reads; Desktop writes one. We accept both. |
@@ -658,7 +659,8 @@ server or a phone. Left:
 
 Shown as Desktop shows them (`EmbeddedContact` and `ContactDetail`,
 `renderPayment` and `PaymentEventNotification`, `renderGiftBadge` and
-`OutgoingGiftBadgeModal`), read only. Tested with mapping tests (a gift
+`OutgoingGiftBadgeModal`). A contact can be shared from the composer
+(see `shareContact` above); payments and gift badges are read only. Tested with mapping tests (a gift
 badge's receipt is made with zkgroup's own issuance, made-up keys), store
 tests and a demo-mode UI test; nothing here has met a real message. Left:
 

@@ -33,6 +33,7 @@ pub mod profile_editor;
 pub mod root;
 pub mod safety_number;
 pub mod settings;
+pub mod share_contact;
 pub mod shortcut_guide;
 pub mod sidebar;
 pub mod sticker_creator;

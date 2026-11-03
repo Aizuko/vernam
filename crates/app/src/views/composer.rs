@@ -1504,13 +1504,14 @@ impl Composer {
     }
 
     /// Desktop's add button (`composerAddMenuButton` in `CompositionArea`):
-    /// a plus opening Photos & videos, File, and Poll where polls can be
-    /// made.
+    /// a plus opening Photos & videos, File, Poll where polls can be made,
+    /// and Contact with `desktop.shareContact` on.
     fn render_add_button(&self, palette: Palette, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         use gpui_kit::component::button::{Button, ButtonVariants as _};
         use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
         let polls = !self.conversation.is_signal()
             && self.state.read(cx).conversation(&self.conversation).is_some_and(|c| signal_backend::can_create_poll(c.kind, &self.state.read(cx).remote_config()));
+        let contacts = !self.conversation.is_signal() && self.state.read(cx).remote_config().share_contact();
         let this = cx.entity().downgrade();
         let (state, conversation) = (self.state.clone(), self.conversation.clone());
         Button::new("add-button")
@@ -1529,8 +1530,14 @@ impl Composer {
                     let _ = file.update(cx, |this, cx| this.pick_files(false, window, cx));
                 }))
                 .when(polls, |menu| {
+                    let (state, conversation) = (state.clone(), conversation.clone());
                     menu.item(PopupMenuItem::new("Poll").icon(IconName::ChartBar).on_click(move |_, window, cx| {
                         crate::views::poll::open_create(state.clone(), conversation.clone(), window, cx)
+                    }))
+                })
+                .when(contacts, |menu| {
+                    menu.item(PopupMenuItem::new("Contact").icon(IconName::User).on_click(move |_, window, cx| {
+                        crate::views::share_contact::open(state.clone(), conversation.clone(), window, cx);
                     }))
                 })
             })
