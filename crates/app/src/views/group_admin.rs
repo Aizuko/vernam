@@ -367,7 +367,7 @@ pub fn open_requests(state: Entity<AppState>, group: ConversationId, window: &mu
                 .items_center()
                 .gap_2()
                 .py_1()
-                .child(person_avatar(state.read(cx).photo_of(sid), &name, color_for(sid), px(28.)))
+                .child(crate::views::common::person_photo(state.read(cx), sid, state.read(cx).photo_of(sid), &name, color_for(sid), px(28.)))
                 .child(div().flex_1().truncate().child(name))
         };
         let with_link = g.link.is_some();
@@ -604,7 +604,7 @@ fn open_admins(state: Entity<AppState>, admins: Vec<String>, window: &mut Window
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(palette.row_hover))
-                .child(person_avatar(state.read(cx).photo_of(aci), &name, color_for(aci), px(28.)))
+                .child(crate::views::common::person_photo(state.read(cx), aci, state.read(cx).photo_of(aci), &name, color_for(aci), px(28.)))
                 .child(name)
                 .on_click(move |_, window, cx| {
                     window.close_all_dialogs(cx);

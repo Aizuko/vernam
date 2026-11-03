@@ -243,6 +243,16 @@ pub use link_preview::{LinkPreviewDraft, PreviewImage};
 pub const SETTING_KEY_TRANSPARENCY_DISABLED: &str = key_transparency::SETTING_DISABLED;
 /// Settings key: `"true"` once Desktop's key transparency introduction was seen.
 pub const SETTING_KEY_TRANSPARENCY_ONBOARDING_SEEN: &str = key_transparency::SETTING_ONBOARDING_SEEN;
+/// Which of Desktop's placeholder gradients a chat's withheld photo gets
+/// (`getIdentifierHash`): a person's from their service id, a group's from
+/// its group id.
+pub fn photo_placeholder_hash(chat: &signal_store::ConversationId) -> u8 {
+    match chat.as_group().and_then(|key| <[u8; 32]>::try_from(key).ok()) {
+        Some(key) => signal_store::identifier_hash_of_bytes(&groups::group_identifier(key)),
+        None => signal_store::identifier_hash(chat.as_direct().unwrap_or(&chat.0)),
+    }
+}
+
 /// Whether key transparency is on at all (Desktop's remote config flag
 /// `desktop.keyTransparency.prod`).
 pub fn key_transparency_on(config: &RemoteConfig) -> bool {
@@ -681,6 +691,11 @@ pub enum Command {
     /// (Desktop's `throttledGetProfiles`). Answered with
     /// `Event::ProfileChanged` when anything shown changed.
     LoadProfile { service_id: String },
+    /// Downloads a photo withheld because the chat isn't accepted (`d:`
+    /// and a service id for a person's): Desktop's "View" on a
+    /// placeholder (`startAvatarDownload`). Answered with
+    /// `Event::ConversationsChanged` once it's here.
+    DownloadPhoto { conversation: ConversationId },
     /// Writes our profile (Desktop's profile editor); answered with
     /// `Event::ProfileSaved`.
     SetProfile(profiles::ProfileEdit),

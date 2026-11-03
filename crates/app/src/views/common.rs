@@ -77,8 +77,109 @@ pub fn with_badge(avatar: AnyElement, size: f32, badge: Option<std::path::PathBu
 
 /// Someone's avatar with their preferred badge (Desktop shows `badges[0]`).
 pub fn badged_avatar(state: &crate::state::AppState, service_id: &str, name: &str, size: f32, cx: &gpui_kit::App) -> AnyElement {
-    let avatar = person_avatar(state.photo_of(service_id), name, crate::theme::color_for(service_id), px(size));
+    let avatar = person_photo(state, service_id, state.photo_of(service_id), name, crate::theme::color_for(service_id), px(size));
     with_badge(avatar, size, badge_image(state, service_id, size, cx))
+}
+
+/// `photo` when there is one; Desktop's gradient when their photo wasn't
+/// downloaded because we haven't accepted them (`Avatar.dom.tsx`,
+/// `hasAvatar && !hasLocalImage`); otherwise their initials.
+pub fn person_photo(
+    state: &crate::state::AppState,
+    service_id: &str,
+    photo: Option<&std::path::Path>,
+    name: &str,
+    color: u8,
+    size: Pixels,
+) -> AnyElement {
+    match photo {
+        None if state.photo_withheld(service_id) => photo_placeholder(signal_store::identifier_hash(service_id), size).into_any_element(),
+        photo => person_avatar(photo, name, color, size),
+    }
+}
+
+/// Signal Desktop's gradients for a photo not downloaded
+/// (`AxoTokens.Avatar`'s `Gradients`, `ts/axo/AxoTokens.std.ts`): top and
+/// bottom colors.
+const PHOTO_PLACEHOLDERS: [(u32, u32); 20] = [
+    (0x252568, 0x9c8f8f),
+    (0x2a4275, 0x9d9ea1),
+    (0x2e4b5f, 0x8aa9b1),
+    (0x2e426c, 0x7a9377),
+    (0x1a341a, 0x807f6e),
+    (0x464e42, 0xd5c38f),
+    (0x595643, 0x93a899),
+    (0x2c2f36, 0x687466),
+    (0x2b1e18, 0x968980),
+    (0x7b7067, 0xa5a893),
+    (0x706359, 0xbda194),
+    (0x383331, 0xa48788),
+    (0x924f4f, 0x897a7a),
+    (0x663434, 0xc58d77),
+    (0x8f4b02, 0xaa9274),
+    (0x784747, 0x8c8f6f),
+    (0x747474, 0xacacac),
+    (0x49484c, 0xa5a6b5),
+    (0x4a4e4d, 0xabafae),
+    (0x3a3a3a, 0x929887),
+];
+
+/// Desktop's stand-in for a photo we haven't downloaded because the chat
+/// isn't accepted (`Avatar.dom.tsx`, `hasAvatar && !hasLocalImage`): a
+/// gradient picked by their identifier hash (`getAvatarPlaceholderGradient`).
+pub fn photo_placeholder(hash: u8, size: Pixels) -> Div {
+    let (top, bottom) = PHOTO_PLACEHOLDERS[hash as usize % PHOTO_PLACEHOLDERS.len()];
+    div().flex_none().size(size).rounded_full().overflow_hidden().bg(gpui_kit::linear_gradient(
+        180.,
+        gpui_kit::linear_color_stop(gpui_kit::rgb(top), 0.),
+        gpui_kit::linear_color_stop(gpui_kit::rgb(bottom), 1.),
+    ))
+}
+
+/// Whether a chat's photo is withheld and not here: a person's (by their
+/// 1:1 chat's id) or a group's.
+pub fn photo_is_withheld(state: &crate::state::AppState, chat: &signal_store::ConversationId) -> bool {
+    match chat.as_direct() {
+        Some(sid) => state.photo_of(sid).is_none() && state.photo_withheld(sid),
+        None => state.conversation(chat).is_some_and(|c| c.avatar_path.is_none() && c.avatar_withheld),
+    }
+}
+
+/// The placeholder with "View" over it, which downloads the photo (Desktop's
+/// `AvatarBlur.BlurPictureWithClickToView` and `startAvatarDownload`), where
+/// Desktop offers it: the chat's hero, About, the contact and chat details.
+/// `None` when the photo is here or there's none.
+pub fn view_photo(state: &gpui_kit::Entity<crate::state::AppState>, chat: &signal_store::ConversationId, size: f32, cx: &gpui_kit::App) -> Option<AnyElement> {
+    if !photo_is_withheld(state.read(cx), chat) {
+        return None;
+    }
+    let hash = signal_backend::photo_placeholder_hash(chat);
+    let (state, chat) = (state.clone(), chat.clone());
+    let white = gpui_kit::rgb(0xffffff);
+    Some(
+        photo_placeholder(hash, px(size))
+            .id(SharedString::from(format!("view-photo-{}", chat.0)))
+            .debug_selector(|| "view-photo".into())
+            .relative()
+            .cursor_pointer()
+            .child(
+                // Desktop's `module-Avatar__click-to-view`: black at 20%.
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui_kit::hsla(0., 0., 0., 0.2))
+                    .text_color(white)
+                    .text_size(px((size * 0.18).clamp(10., 14.)))
+                    .child(gpui_kit::svg().path("icons/signal/click-outline-24.svg").size(px((size * 0.3).min(24.))).text_color(white))
+                    .child("View"),
+            )
+            .on_click(move |_, _, cx| state.read(cx).send(signal_backend::Command::DownloadPhoto { conversation: chat.clone() }))
+            .into_any_element(),
+    )
 }
 
 /// A chat's avatar, with the person's badge for a 1:1 chat (Desktop's
@@ -148,15 +249,18 @@ pub fn conversation_avatar(conversation: &Conversation, size: Pixels) -> AnyElem
     if conversation.id.is_signal() {
         return signal_avatar(size);
     }
-    // A message request's photo isn't shown (Desktop doesn't download it
-    // until the request is accepted).
-    if let Some(path) = conversation.avatar_path.as_ref().filter(|_| conversation.accepted) {
+    if let Some(path) = conversation.avatar_path.as_ref() {
         return img(std::path::PathBuf::from(path))
             .flex_none()
             .size(size)
             .rounded_full()
             .object_fit(ObjectFit::Cover)
             .into_any_element();
+    }
+    // One not downloaded because the chat isn't accepted.
+    if conversation.avatar_withheld {
+        let hash = signal_backend::photo_placeholder_hash(&conversation.id);
+        return photo_placeholder(hash, size).into_any_element();
     }
     let icon = match conversation.kind {
         ConversationKind::Group => Some(IconName::Users),

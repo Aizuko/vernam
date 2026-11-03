@@ -24,7 +24,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::state::AppState;
 use crate::theme::{Palette, color_for};
-use crate::views::common::{ClosedByClick, person_avatar};
+use crate::views::common::ClosedByClick;
 use crate::views::conversation::ConversationView;
 use crate::views::emoji_picker::{EmojiPicker, PickerEvent};
 
@@ -336,7 +336,7 @@ pub fn open_votes(view: WeakEntity<ConversationView>, state: Option<Entity<AppSt
                                 .flex()
                                 .items_center()
                                 .gap_3()
-                                .child(person_avatar(photo.as_deref(), &name, color_for(author.as_deref().unwrap_or("")), px(36.)))
+                                .child(crate::views::common::person_photo(state.read(cx), author.as_deref().unwrap_or(""), photo.as_deref(), &name, color_for(author.as_deref().unwrap_or("")), px(36.)))
                                 .child(div().flex_1().min_w_0().truncate().child(name))
                         })))
                     }

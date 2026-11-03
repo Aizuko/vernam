@@ -305,7 +305,12 @@ fn render_select(dialog: &Entity<ShareContactDialog>, d: Dialog, palette: Palett
         .map(|(ix, candidate)| {
             let chat = state.conversation(&candidate.id);
             let color = chat.map_or_else(|| candidate.id.as_direct().map_or(0, signal_store::avatar_color), |c| c.color);
-            let photo = chat.filter(|c| c.accepted).and_then(|c| c.avatar_path.clone());
+            let photo = candidate
+                .id
+                .as_direct()
+                .and_then(|sid| state.photo_of(sid))
+                .map(|p| p.to_string_lossy().into_owned())
+                .or_else(|| chat.and_then(|c| c.avatar_path.clone()));
             let pick = dialog.clone();
             let picked = candidate.clone();
             clickable(format!("share-contact-candidate-{ix}"), palette)
@@ -313,7 +318,14 @@ fn render_select(dialog: &Entity<ShareContactDialog>, d: Dialog, palette: Palett
                     pick.update(cx, |d, cx| d.pick(picked.clone(), cx));
                     window.refresh();
                 })
-                .child(person_avatar(photo.as_deref().map(std::path::Path::new), &candidate.title, color, px(36.)))
+                .child(crate::views::common::person_photo(
+                    state,
+                    candidate.id.as_direct().unwrap_or_default(),
+                    photo.as_deref().map(std::path::Path::new),
+                    &candidate.title,
+                    color,
+                    px(36.),
+                ))
                 .child(div().flex_1().min_w_0().truncate().child(candidate.title.clone()))
                 .into_any_element()
         })

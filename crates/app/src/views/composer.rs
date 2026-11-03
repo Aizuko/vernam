@@ -1592,7 +1592,7 @@ impl Composer {
                     Suggestions::People(people) => {
                         let (aci, name) = &people[ix];
                         let photo = self.state.read(cx).photo_of(aci);
-                        row.child(crate::views::common::person_avatar(photo, name, crate::theme::color_for(aci), px(24.)))
+                        row.child(crate::views::common::person_photo(self.state.read(cx), aci, photo, name, crate::theme::color_for(aci), px(24.)))
                             .child(div().flex_1().min_w_0().truncate().text_sm().child(name.clone()))
                     }
                 }

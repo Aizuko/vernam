@@ -119,7 +119,7 @@ fn show(state: Entity<AppState>, message: Message, states: Vec<SendState>, windo
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(crate::views::common::person_avatar(photo.as_deref(), &who, color, px(32.)))
+                        .child(crate::views::common::person_photo(app, &person.recipient, photo.as_deref(), &who, color, px(32.)))
                         .child(
                             div()
                                 .flex_1()

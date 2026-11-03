@@ -2056,7 +2056,10 @@ impl ConversationView {
                         // Level with the bubble's bottom, not the reactions under it.
                         .pb(px(reactions_below(&message)))
                         .when(last_in_group, |d| {
-                            let avatar = person_avatar(author_photo.as_deref(), &author_name, author_color, px(28.));
+                            let avatar = match message.author.as_deref() {
+                                Some(a) => crate::views::common::person_photo(self.state.read(cx), a, author_photo.as_deref(), &author_name, author_color, px(28.)),
+                                None => person_avatar(author_photo.as_deref(), &author_name, author_color, px(28.)),
+                            };
                             let badge = message.author.as_deref().and_then(|a| crate::views::common::badge_image(self.state.read(cx), a, 28., cx));
                             let open = message.author.clone().map(|a| (self.state.clone(), a, self.id.clone()));
                             d.child(
@@ -3349,7 +3352,9 @@ impl ConversationView {
                             .gap_3()
                             .px_3()
                             .py_1p5()
-                            .child(person_avatar(
+                            .child(crate::views::common::person_photo(
+                                self.state.read(cx),
+                                reaction.author.as_deref().unwrap_or_default(),
                                 reaction.author.as_deref().and_then(|a| self.state.read(cx).photo_of(a)),
                                 &name,
                                 color,
@@ -3474,7 +3479,7 @@ impl ConversationView {
                         stack.push(
                             div()
                                 .debug_selector(move || format!("typing-avatar-{ix}"))
-                                .child(person_avatar(state.photo_of(aci), &self.reactor_name(Some(aci), cx), color_for(aci), px(28.)))
+                                .child(crate::views::common::person_photo(state, aci, state.photo_of(aci), &self.reactor_name(Some(aci), cx), color_for(aci), px(28.)))
                                 .into_any_element(),
                         );
                     }

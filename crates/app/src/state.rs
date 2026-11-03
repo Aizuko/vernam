@@ -276,6 +276,9 @@ pub struct AppState {
     jump: Option<(ConversationId, i64)>,
     /// Downloaded profile photos by service id.
     person_avatars: HashMap<String, std::path::PathBuf>,
+    /// People whose photo wasn't downloaded because we haven't accepted
+    /// them (`signal_store::REMOTE_AVATAR`).
+    withheld_photos: std::collections::HashSet<String>,
     /// People whose safety number changed after we verified it: sends to
     /// them ask first (`signal_backend::unverified_people`).
     pub unverified: std::collections::HashSet<String>,
@@ -520,6 +523,7 @@ impl AppState {
             conversations: Vec::new(),
             archived: Vec::new(),
             person_avatars: HashMap::new(),
+            withheld_photos: Default::default(),
             unverified: Default::default(),
             captcha_pending: false,
             captcha_required: false,
@@ -1366,6 +1370,7 @@ impl AppState {
                 self.conversations.clear();
                 self.archived.clear();
                 self.person_avatars.clear();
+                self.withheld_photos.clear();
                 self.own_profile = None;
                 self.badges = Badges::default();
                 self.contact_avatars.clear();
@@ -1452,17 +1457,19 @@ impl AppState {
                     db.person_avatars().await?,
                     db.setting(signal_backend::SETTING_CONTACT_AVATARS).await?,
                     signal_backend::unverified_people(&db).await,
+                    db.settings_with_prefix(signal_store::REMOTE_PERSON_AVATAR).await?,
                 ))
             });
         self.reload_task = Some(cx.spawn(async move |this, cx| {
             let result = query.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok((conversations, archived, avatars, contact_avatars, unverified)) => {
+                    Ok((conversations, archived, avatars, contact_avatars, unverified, withheld)) => {
                         this.conversations = conversations;
                         this.unverified = unverified;
                         this.archived = archived;
                         this.person_avatars = avatars.into_iter().map(|(sid, path)| (sid, path.into())).collect();
+                        this.withheld_photos = withheld.into_iter().map(|(sid, _)| sid).collect();
                         this.contact_avatars = contact_avatars
                             .and_then(|json| serde_json::from_str::<HashMap<String, std::path::PathBuf>>(&json).ok())
                             .unwrap_or_default();
@@ -2842,6 +2849,12 @@ impl AppState {
         let prefer_contact = !ours && self.prefs.flag(signal_backend::AccountSetting::PreferContactAvatars);
         let (first, second) = if prefer_contact { (contact, profile) } else { (profile, contact) };
         first.or(second).map(|p| p.as_path())
+    }
+
+    /// Their photo wasn't downloaded because we haven't accepted them
+    /// (Desktop's `hasAvatar` without a local image).
+    pub fn photo_withheld(&self, service_id: &str) -> bool {
+        self.withheld_photos.contains(service_id)
     }
 
     /// Desktop's "Import now": asks the phone for its contacts; failed if

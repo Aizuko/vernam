@@ -163,7 +163,9 @@ pub fn open_about(state: Entity<AppState>, service_id: String, window: &mut Wind
         let name = if me { own.name().unwrap_or_else(|| "You".into()) } else { info_now.name.clone() };
         let chat = ConversationId::direct(&service_id);
         let conversation = s.conversation(&chat).cloned();
-        let photo = crate::views::common::person_avatar(s.photo_of(&service_id), &name, crate::theme::color_for(&service_id), px(160.));
+        let photo = crate::views::common::view_photo(&state, &chat, 160., cx).unwrap_or_else(|| {
+            crate::views::common::person_avatar(s.photo_of(&service_id), &name, crate::theme::color_for(&service_id), px(160.))
+        });
         // Desktop's "Nickname (profile name)" when a nickname shows.
         let plain = details.nickname.as_ref().filter(|n| n.nickname().is_some()).and_then(|n| n.plain_name.clone()).filter(|p| *p != name);
         let name_label = div()
@@ -279,7 +281,9 @@ pub fn open_contact(state: Entity<AppState>, service_id: String, group: Option<C
         let blocked = conversation.as_ref().is_some_and(|c| c.blocked);
         let in_call = s.call.is_some() || s.lobby.is_some();
         let badge = badge_image(s, &service_id, 80., cx);
-        let photo = crate::views::common::person_avatar(s.photo_of(&service_id), &name, crate::theme::color_for(&service_id), px(80.));
+        let photo = crate::views::common::view_photo(&state, &chat, 80., cx).unwrap_or_else(|| {
+            crate::views::common::person_avatar(s.photo_of(&service_id), &name, crate::theme::color_for(&service_id), px(80.))
+        });
         let entry = DirectoryEntry {
             id: chat.clone(),
             kind: ConversationKind::Direct,
@@ -479,6 +483,7 @@ pub fn hero(state: &Entity<AppState>, conversation: &Conversation, details: Opti
     let palette = Palette::get(cx);
     let s = state.read(cx);
     let avatar = match conversation.id.as_direct() {
+        _ if let Some(view) = crate::views::common::view_photo(state, &conversation.id, 72., cx) => view,
         Some(sid) if conversation.kind == ConversationKind::Direct => badged_avatar(s, sid, &conversation.title, 72., cx),
         _ => crate::views::common::conversation_avatar(conversation, px(72.)),
     };
@@ -774,6 +779,18 @@ mod ui_tests {
         let card = group.debug_bounds("conversation-hero").unwrap();
         let members = group.debug_bounds("hero-members").unwrap();
         assert!(members.left() >= card.left() && members.right() <= card.right(), "{members:?} outside {card:?}");
+        // Photos are downloaded for those, not for the stranger's request
+        // (Desktop's `setAndMaybeFetchProfileAvatar`).
+        assert!(!shows(&mut maya, "view-photo"));
+        assert!(shows(&mut stranger, "view-photo"));
+        let sid = STRANGER;
+        assert!(state.read_with(cx, |s, _| s.photo_of(sid).is_none() && s.photo_withheld(sid)));
+        // "View" downloads it.
+        click_at(&mut stranger, "view-photo");
+        wait(&mut stranger, "the stranger's photo", &mut |cx| !shows(cx, "view-photo"));
+        assert!(state.read_with(cx, |s, _| s.photo_of(sid).is_some() && !s.photo_withheld(sid)));
+        let chat = state.read_with(cx, |s, _| s.conversation(&ConversationId::direct(sid)).cloned().unwrap());
+        assert!(chat.avatar_path.is_some() && !chat.avatar_withheld && !chat.accepted, "downloaded, still a request");
         backend.shutdown();
     }
 }

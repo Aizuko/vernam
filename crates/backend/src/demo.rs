@@ -563,8 +563,31 @@ async fn seed_message_requests(db: &AppDb, now: i64) -> signal_store::Result<()>
         })
         .await?;
     }
-
+    // Their photo isn't downloaded until the request is accepted (Desktop's
+    // `remoteAvatarUrl`): a placeholder with "View" shows instead.
+    db.set_setting(&format!("{}{STRANGER}", signal_store::REMOTE_AVATAR), "demo/stranger").await?;
     Ok(())
+}
+
+/// A withheld photo's "download": one drawn here, made the chat's (and
+/// the person's). Whether one was withheld.
+async fn demo_download_photo(db: &AppDb, data_dir: &Path, conversation: &ConversationId) -> bool {
+    let key = format!("{}{}", signal_store::REMOTE_AVATAR, conversation.0);
+    if db.setting(&key).await.ok().flatten().is_none() {
+        return false;
+    }
+    let dir = data_dir.join("avatars");
+    let file = dir.join(format!("demo-withheld-{}.jpg", conversation.0.replace(':', "-")));
+    if std::fs::create_dir_all(&dir).and_then(|_| write_demo_photo(&file, 240, 240)).is_err() {
+        return false;
+    }
+    let Some(path) = file.to_str() else { return false };
+    let _ = db.set_avatar(conversation, Some(path)).await;
+    if let Some(sid) = conversation.as_direct() {
+        let _ = db.set_person_avatar(sid, path).await;
+    }
+    let _ = db.remove_setting(&key).await;
+    true
 }
 
 /// The demo's call link ("Book club"), ours: a made-up 16-byte root key.
@@ -1583,6 +1606,18 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
             Command::AnswerMessageRequest { conversation, answer } => {
                 for event in demo_answer_message_request(&db, &conversation, answer).await {
                     emit(event);
+                }
+                // Accepting downloads the photo held back, as the real one does.
+                if answer == signal_store::MessageRequestResponse::Accept && demo_download_photo(&db, &data_dir, &conversation).await {
+                    let _ = events.unbounded_send(Event::ConversationsChanged);
+                }
+            }
+            Command::DownloadPhoto { conversation } => {
+                if demo_download_photo(&db, &data_dir, &conversation).await {
+                    let _ = events.unbounded_send(Event::ConversationsChanged);
+                    if let Some(sid) = conversation.as_direct() {
+                        emit(Event::ProfileChanged(sid.to_owned()));
+                    }
                 }
             }
             Command::SetExpireTimer { conversation, seconds } => {

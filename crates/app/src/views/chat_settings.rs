@@ -13,7 +13,7 @@ use signal_store::{ContactNickname, Conversation, ConversationKind};
 
 use crate::state::AppState;
 use crate::theme::{Palette, color_for};
-use crate::views::common::{conversation_avatar, person_avatar};
+use crate::views::common::conversation_avatar;
 
 pub fn open(state: Entity<AppState>, conversation: Conversation, window: &mut Window, cx: &mut App) {
     let group = conversation.kind == ConversationKind::Group;
@@ -93,7 +93,10 @@ pub fn open(state: Entity<AppState>, conversation: Conversation, window: &mut Wi
             .flex()
             .items_center()
             .gap_3()
-            .child(conversation_avatar(&conversation, px(56.)))
+            .child(
+                crate::views::common::view_photo(&state, &conversation.id, 56., cx)
+                    .unwrap_or_else(|| conversation_avatar(&conversation, px(56.))),
+            )
             .child(
                 div()
                     .flex()
@@ -167,7 +170,7 @@ pub fn open(state: Entity<AppState>, conversation: Conversation, window: &mut Wi
                         crate::views::group_admin::open_member(member_state.clone(), member_group.clone(), member.clone(), window, cx)
                     })
                 })
-                .child(person_avatar(state.read(cx).photo_of(&aci), &name, color_for(&aci), px(28.)))
+                .child(crate::views::common::person_photo(state.read(cx), &aci, state.read(cx).photo_of(&aci), &name, color_for(&aci), px(28.)))
                 .child(div().flex_1().truncate().child(if you { "You".to_owned() } else { name }))
                 .when_some(conversation.member_labels.get(&aci).cloned(), |d, label| {
                     d.child(div().text_xs().text_color(palette.text_secondary).child(match label.emoji {

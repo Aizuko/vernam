@@ -439,6 +439,7 @@ mod tests {
             member_labels: Default::default(),
             can_label: false,
             avatar_path: None,
+            avatar_withheld: false,
             last_outgoing_status: None,
             unread_poll_votes: false,
             accepted: true,

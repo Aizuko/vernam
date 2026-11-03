@@ -503,7 +503,9 @@ impl StoryViewer {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(crate::views::common::person_avatar(
+                            .child(crate::views::common::person_photo(
+                                state,
+                                &view.viewer,
                                 photo.as_deref(),
                                 &name,
                                 crate::theme::color_for(&ConversationId::direct(&view.viewer).0),

@@ -199,7 +199,7 @@ fn open_picker(state: Entity<AppState>, adding: Option<Adding>, window: &mut Win
                         window.refresh();
                     })
                 })
-                .child(person_avatar(state.read(cx).photo_of(&sid), &person.title, color_for(&person.id.0), px(32.)))
+                .child(crate::views::common::person_photo(state.read(cx), &sid, state.read(cx).photo_of(&sid), &person.title, color_for(&person.id.0), px(32.)))
                 .child(div().flex_1().truncate().child(person.title.clone()))
                 .when(member, |d| d.child(div().text_xs().text_color(palette.text_secondary).child("Already a member")))
                 .child(

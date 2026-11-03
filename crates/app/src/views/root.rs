@@ -1299,6 +1299,8 @@ mod tests {
         assert!(cx.debug_bounds("voice-call").is_none());
         // Delete only once reported or blocked.
         assert!(cx.debug_bounds("mr-delete").is_none() && cx.debug_bounds("mr-block").is_some());
+        // Their photo isn't downloaded until it's accepted.
+        assert!(state.read_with(&cx, |s, _| s.conversation(&stranger).is_some_and(|c| c.avatar_withheld && c.avatar_path.is_none())));
 
         click(&mut cx, "spoofing-review");
         wait(&mut cx, "the review", &|cx| cx.debug_bounds("review-request").is_some());
@@ -1311,6 +1313,10 @@ mod tests {
         let chat = state.read_with(&cx, |s, _| s.conversation(&stranger).cloned()).unwrap();
         assert!(chat.accepted && chat.message_request == signal_store::MessageRequestResponse::Accept);
         assert!(cx.debug_bounds("spoofing-warning").is_none(), "only a request is warned about");
+        // Accepting downloads the photo (Desktop's `applyMessageRequestResponse`).
+        wait(&mut cx, "the photo", &|cx| {
+            state.read_with(cx, |s, _| s.conversation(&stranger).is_some_and(|c| !c.avatar_withheld && c.avatar_path.is_some()))
+        });
         // Desktop's notice, and its Block or Report... button.
         wait(&mut cx, "the notice", &|cx| cx.debug_bounds("notice-block-or-report").is_some());
         backend.shutdown();

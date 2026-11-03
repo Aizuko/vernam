@@ -19,7 +19,7 @@ use signal_store::{ConversationId, DirectoryEntry};
 
 use crate::state::AppState;
 use crate::theme::{Palette, color_for};
-use crate::views::common::{conversation_avatar, person_avatar};
+use crate::views::common::conversation_avatar;
 
 /// Runs once the first post's My Story privacy is saved.
 pub type OnSaved = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -541,7 +541,7 @@ fn render_list(privacy: &Entity<Privacy>, id: &str, palette: Palette, _window: &
             .gap_3()
             .px_2()
             .py_1()
-            .child(person_avatar(photo.as_deref(), &title, color_for(&format!("d:{sid}")), px(28.)))
+            .child(crate::views::common::person_photo(state.read(cx), &sid, photo.as_deref(), &title, color_for(&format!("d:{sid}")), px(28.)))
             .child(div().flex_1().truncate().child(title.clone()))
             .child(Button::new(SharedString::from(format!("privacy-remove-{sid}"))).label("Remove").small().ghost().on_click(
                 move |_, window, cx| {
@@ -644,7 +644,7 @@ fn render_picker(privacy: &Entity<Privacy>, palette: Palette, cx: &App) -> AnyEl
                     });
                     window.refresh();
                 })
-                .child(person_avatar(state.photo_of(&sid), &person.title, color_for(&person.id.0), px(32.)))
+                .child(crate::views::common::person_photo(state, &sid, state.photo_of(&sid), &person.title, color_for(&person.id.0), px(32.)))
                 .child(div().flex_1().truncate().child(person.title.clone()))
                 .child(check(on, palette))
                 .into_any_element()
@@ -715,7 +715,7 @@ fn render_group(privacy: &Entity<Privacy>, group: &ConversationId, palette: Pale
                 .gap_3()
                 .px_2()
                 .py_1()
-                .child(person_avatar(photo.as_deref(), &name, color_for(&format!("d:{sid}")), px(28.)))
+                .child(crate::views::common::person_photo(state, sid, photo.as_deref(), &name, color_for(&format!("d:{sid}")), px(28.)))
                 .child(div().flex_1().truncate().child(name))
                 .into_any_element()
         })

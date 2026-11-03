@@ -86,8 +86,8 @@ gpui_kit::assets::icon_assets!(
 );
 
 /// Signal Desktop's own icons (AGPL-3.0-only, like this app), where Lucide
-/// has no match: the message status circles, the Signal chat's logo, and
-/// the navigation tabs' icons.
+/// has no match: the message status circles, the Signal chat's logo, the
+/// navigation tabs' icons, and the hand on a photo's "View".
 const SIGNAL_ICONS: &[(&str, &[u8])] = &[
     ("icons/signal/messagestatus-sending.svg", include_bytes!("../assets/icons/signal/messagestatus-sending.svg")),
     ("icons/signal/messagestatus-sent.svg", include_bytes!("../assets/icons/signal/messagestatus-sent.svg")),
@@ -95,6 +95,7 @@ const SIGNAL_ICONS: &[(&str, &[u8])] = &[
     ("icons/signal/messagestatus-read.svg", include_bytes!("../assets/icons/signal/messagestatus-read.svg")),
     ("icons/signal/error-circle.svg", include_bytes!("../assets/icons/signal/error-circle.svg")),
     ("icons/signal/profile-avatar.svg", include_bytes!("../assets/icons/signal/profile-avatar.svg")),
+    ("icons/signal/click-outline-24.svg", include_bytes!("../assets/icons/signal/click-outline-24.svg")),
     ("icons/signal/nav-chat.svg", include_bytes!("../assets/icons/signal/nav-chat.svg")),
     ("icons/signal/nav-chat-fill.svg", include_bytes!("../assets/icons/signal/nav-chat-fill.svg")),
     ("icons/signal/nav-phone.svg", include_bytes!("../assets/icons/signal/nav-phone.svg")),

@@ -26,6 +26,7 @@ mod receipts;
 mod session_reset;
 mod settings;
 mod share_contact;
+mod photos;
 
 pub(crate) use view_once::VIEW_ONCE_DIR;
 
@@ -88,11 +89,20 @@ enum PhotoOutcome {
     NoKey,
     ProfileFailed,
     DownloadFailed,
+    /// Not downloaded: their chat isn't accepted (see `photos.rs`). `new`
+    /// when the path is newly kept, which changes what shows.
+    Withheld { new: bool },
 }
 
 impl PhotoOutcome {
+    /// Whether what shows changed.
+    fn changed(self) -> bool {
+        matches!(self, Self::Changed | Self::Withheld { new: true })
+    }
+
     fn label(self) -> &'static str {
         match self {
+            Self::Withheld { .. } => "withheld (not accepted)",
             Self::Changed => "updated",
             Self::Unchanged => "unchanged",
             Self::NoPhoto => "no photo",
@@ -478,6 +488,9 @@ struct Actor {
     avatar_batch_pending: std::cell::Cell<bool>,
     /// Favorite stickers' own downloads (`sticker_favorites.rs`).
     favorite_downloads: sticker_favorites::FavoriteDownloads,
+    /// Withheld photos, now trusted, whose download failed this session:
+    /// not taken again, so the rest get their turn (`photos.rs`).
+    trusted_photo_failures: RefCell<HashSet<String>>,
     /// The history transfer after linking, while it can still be skipped
     /// (taken once the import starts).
     history: RefCell<Option<tokio::task::JoinHandle<()>>>,
@@ -610,6 +623,7 @@ pub(crate) async fn run(
         video,
         avatar_batch_pending: std::cell::Cell::new(false),
         favorite_downloads: Default::default(),
+        trusted_photo_failures: RefCell::default(),
         history: RefCell::new(None),
         outbound,
         linking: RefCell::new(false),
@@ -1124,6 +1138,7 @@ impl Actor {
                     }
                 }
                 Command::LoadProfile { service_id } => self.load_profile(service_id).await,
+                Command::DownloadPhoto { conversation } => self.download_withheld_photo(&conversation).await,
                 Command::SetProfile(edit) => self.set_profile(edit).await,
                 Command::ReserveUsername { nickname, discriminator } => self.reserve_username(nickname, discriminator),
                 Command::ConfirmUsername(reservation) => self.confirm_username(reservation).await,
@@ -2007,12 +2022,13 @@ impl Actor {
         }
         let conversation = ConversationId::group(&key);
         self.ensure_title(&conversation).await;
-        if let Some(manager) = self.manager() {
-            self.refresh_group_avatar(&manager, key, false).await;
-        }
         // We made it: never a message request (Desktop sets `addedBy` to us).
         if let Err(error) = self.db.set_message_request(&conversation, signal_store::MessageRequestResponse::Accept).await {
             warn!(%error, "failed to mark our new group accepted");
+        }
+        // After it's accepted, so its photo isn't withheld.
+        if let Some(manager) = self.manager() {
+            self.refresh_group_avatar(&manager, key, false).await;
         }
         self.emit(Event::ConversationsChanged);
         self.emit(Event::GroupCreated(conversation.clone()));
@@ -3050,16 +3066,19 @@ impl Actor {
             warn!(%error, "failed to create avatars directory");
             return;
         }
+        let mut changed = self.drop_untrusted_photos().await;
         let mut conversations = self.db.conversations().await.unwrap_or_default();
         conversations.extend(self.db.archived_conversations().await.unwrap_or_default());
-        let mut changed = false;
         // Groups are checked every time: a group's copy is local, so it's cheap.
         for conversation in &conversations {
             if let Some(key) = conversation.id.as_group().and_then(|k| <[u8; 32]>::try_from(k).ok()) {
                 changed |= self.refresh_group_avatar(&manager, key, false).await;
             }
         }
-        let (people_changed, more) = self.sync_person_avatars(&manager, &conversations, &dir).await;
+        let (mut people_changed, mut more) = self.sync_person_avatars(&manager, &conversations, &dir).await;
+        let (trusted_changed, more_trusted) = self.download_now_trusted(&manager, &dir).await;
+        people_changed |= trusted_changed;
+        more |= more_trusted;
         // Those profiles named badges; fetch their images.
         self.download_badges();
         if changed || people_changed {
@@ -3147,7 +3166,7 @@ impl Actor {
         let checking = due.len().min(AVATAR_CHECKS_PER_SYNC);
         for (_, _, sid) in due.into_iter().take(AVATAR_CHECKS_PER_SYNC) {
             let outcome = self.refresh_person_avatar(manager, &sid, saved.get(&sid).map(String::as_str), dir).await;
-            changed |= outcome == PhotoOutcome::Changed;
+            changed |= outcome.changed();
             *outcomes.entry(outcome.label()).or_default() += 1;
         }
         if checking > 0 || keyless > 0 {
@@ -3184,12 +3203,15 @@ impl Actor {
         };
         // The same fetch brings their name, about and badges up to date.
         self.save_remote_profile(sid, &remote).await;
-        self.apply_person_photo(manager, sid, remote.avatar, key, saved, dir).await
+        self.apply_person_photo(manager, sid, remote.avatar, key, saved, dir, false).await
     }
 
     /// Brings their saved photo in line with `path`, their profile's
     /// avatar: downloaded when it differs from the one saved, removed when
-    /// there's none. Kept for their 1:1 chat and wherever they appear.
+    /// there's none. Kept for their 1:1 chat and wherever they appear. A
+    /// new photo of someone we haven't accepted is only noted, unless
+    /// `force` (Desktop's `setAndMaybeFetchProfileAvatar`, `photos.rs`).
+    #[allow(clippy::too_many_arguments)]
     async fn apply_person_photo(
         &self,
         manager: &SignalManager,
@@ -3198,17 +3220,21 @@ impl Actor {
         key: ProfileKey,
         saved: Option<&str>,
         dir: &std::path::Path,
+        force: bool,
     ) -> PhotoOutcome {
+        let ours = sid == self.self_aci();
         // Our "chat" is Note to Self, which keeps its own icon (Desktop's).
-        let chat = if sid == self.self_aci() { None } else { Some(ConversationId::direct(sid)) };
+        let chat = if ours { None } else { Some(ConversationId::direct(sid)) };
+        let withheld = ConversationId::direct(sid);
         let Some(path) = path else {
+            let forgot = self.forget_withheld_photo(&withheld).await;
             // No photo: drop ours, and their chat's (which can predate ours).
             let chat_had = match &chat {
                 Some(chat) => self.db.conversation(chat).await.ok().flatten().and_then(|c| c.avatar_path),
                 None => None,
             };
             if saved.is_none() && chat_had.is_none() {
-                return PhotoOutcome::NoPhoto;
+                return if forgot { PhotoOutcome::Changed } else { PhotoOutcome::NoPhoto };
             }
             for old in saved.into_iter().chain(chat_had.as_deref()) {
                 let _ = std::fs::remove_file(old);
@@ -3227,12 +3253,19 @@ impl Actor {
                 Some(chat) => self.db.conversation(chat).await.ok().flatten().map(|c| c.avatar_path),
                 None => None,
             };
+            let forgot = self.forget_withheld_photo(&withheld).await;
             if let (Some(None), Some(chat)) = (chat_has, &chat)
                 && self.db.set_avatar(chat, current.to_str()).await.is_ok()
             {
                 return PhotoOutcome::Changed;
             }
-            return PhotoOutcome::Unchanged;
+            return if forgot { PhotoOutcome::Changed } else { PhotoOutcome::Unchanged };
+        }
+        // A photo already here stays until this one comes, as Desktop keeps
+        // `profileAvatar` when it only notes `remoteAvatarUrl`.
+        let trusted = force || ours || self.db.photo_trusted(sid).await.unwrap_or(false);
+        if !photos::person_photo_downloads(force, ours, trusted) {
+            return PhotoOutcome::Withheld { new: self.withhold_photo(&withheld, &path).await };
         }
         let bytes = match crate::profiles::download_avatar(manager, &path, key).await {
             Ok(bytes) => bytes,
@@ -3255,7 +3288,10 @@ impl Actor {
             let _ = self.db.set_avatar(chat, Some(file)).await;
         }
         match self.db.set_person_avatar(sid, file).await {
-            Ok(()) => PhotoOutcome::Changed,
+            Ok(()) => {
+                self.forget_withheld_photo(&withheld).await;
+                PhotoOutcome::Changed
+            }
             Err(_) => PhotoOutcome::DownloadFailed,
         }
     }
@@ -3265,6 +3301,13 @@ impl Actor {
     /// removed when the group has none. `fetch` asks the group server rather
     /// than presage's copy of the group, for right after a change.
     async fn refresh_group_avatar(&self, manager: &SignalManager, key: [u8; 32], fetch: bool) -> bool {
+        self.apply_group_photo(manager, key, fetch, false).await
+    }
+
+    /// [`Self::refresh_group_avatar`], which only notes a new photo of a
+    /// group we haven't accepted or are only invited to, unless `force`
+    /// (Desktop's `applyNewAvatar` with `forceDownload`).
+    async fn apply_group_photo(&self, manager: &SignalManager, key: [u8; 32], fetch: bool, force: bool) -> bool {
         let conversation = ConversationId::group(&key);
         let stored = if fetch { None } else { self.store.group(key).await.ok().flatten().map(|g| g.avatar) };
         let failed_key = format!("{SETTING_GROUP_FETCH_FAILED}{}", conversation.0);
@@ -3295,9 +3338,13 @@ impl Actor {
                 }
             }
         };
-        let saved = self.db.conversation(&conversation).await.ok().flatten().and_then(|c| c.avatar_path);
+        let chat = self.db.conversation(&conversation).await.ok().flatten();
+        // `accepted` can hold for a group we left and are invited back to.
+        let accepted = chat.as_ref().is_some_and(|c| c.accepted && !c.invited());
+        let saved = chat.and_then(|c| c.avatar_path);
         if path.is_empty() {
-            let Some(saved) = saved else { return false };
+            let forgot = self.forget_withheld_photo(&conversation).await;
+            let Some(saved) = saved else { return forgot };
             let _ = std::fs::remove_file(&saved);
             return self.db.set_avatar(&conversation, None).await.is_ok();
         }
@@ -3305,7 +3352,12 @@ impl Actor {
         let name = format!("{}-{}", conversation.0.replace(':', "-"), &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(path.as_bytes()))[..16]);
         let current = saved.as_deref().map(std::path::Path::new);
         if current.is_some_and(|p| p.exists() && p.file_stem().is_some_and(|stem| stem == name.as_str())) {
-            return false;
+            return self.forget_withheld_photo(&conversation).await;
+        }
+        // Desktop's `areWePending || !isConversationAccepted` (an invited
+        // group isn't accepted); a photo already here stays.
+        if !photos::group_photo_downloads(force, accepted) {
+            return self.withhold_photo(&conversation, &path).await;
         }
         let bytes = match crate::groups::download_avatar(manager, key, &path).await {
             Ok(Some(bytes)) if !bytes.is_empty() => bytes,
@@ -3324,7 +3376,11 @@ impl Actor {
         if let Some(old) = current.filter(|old| *old != file) {
             let _ = std::fs::remove_file(old);
         }
-        self.db.set_avatar(&conversation, file.to_str()).await.is_ok()
+        let set = self.db.set_avatar(&conversation, file.to_str()).await.is_ok();
+        if set {
+            self.forget_withheld_photo(&conversation).await;
+        }
+        set
     }
 
     async fn title_for(self: &Rc<Self>, conversation: &ConversationId) -> Option<ConversationUpdate> {

@@ -106,6 +106,12 @@ impl Actor {
             if !before.accepted {
                 self.download_held(conversation).await;
             }
+            // Desktop's `applyMessageRequestResponse`: the photo held back
+            // (`photos.rs`), whenever one was.
+            if super::photos::answer_downloads_photo(answer, before.avatar_withheld) {
+                let (this, conversation) = (self.clone(), conversation.clone());
+                tokio::task::spawn_local(async move { this.download_withheld_photo(&conversation).await });
+            }
             if local && !group {
                 self.send_profile_key(conversation).await;
             }

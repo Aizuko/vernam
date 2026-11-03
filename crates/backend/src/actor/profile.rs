@@ -104,8 +104,8 @@ impl Actor {
         let dir = self.config.data_dir.join("avatars");
         if std::fs::create_dir_all(&dir).is_ok() {
             let saved = self.db.person_avatars().await.unwrap_or_default().into_iter().find(|(s, _)| *s == sid).map(|(_, p)| p);
-            let outcome = self.apply_person_photo(&manager, &sid, remote.avatar.clone(), key, saved.as_deref(), &dir).await;
-            if outcome == PhotoOutcome::Changed {
+            let outcome = self.apply_person_photo(&manager, &sid, remote.avatar.clone(), key, saved.as_deref(), &dir, false).await;
+            if outcome.changed() {
                 self.emit(Event::ConversationsChanged);
                 self.emit(Event::ProfileChanged(sid.clone()));
                 if ours {
@@ -159,8 +159,8 @@ impl Actor {
             if std::fs::create_dir_all(&dir).is_ok() {
                 let key = self.our_profile_key(manager).await;
                 let saved = self.db.person_avatars().await.unwrap_or_default().into_iter().find(|(s, _)| *s == me).map(|(_, p)| p);
-                let outcome = self.apply_person_photo(manager, &me, record.avatar_url_path.clone(), key, saved.as_deref(), &dir).await;
-                changed |= outcome == PhotoOutcome::Changed;
+                let outcome = self.apply_person_photo(manager, &me, record.avatar_url_path.clone(), key, saved.as_deref(), &dir, false).await;
+                changed |= outcome.changed();
                 // Only once it's here, so a failed download is tried again
                 // at the next sync.
                 if outcome != PhotoOutcome::DownloadFailed {

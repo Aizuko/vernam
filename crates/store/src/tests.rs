@@ -2377,6 +2377,94 @@ async fn groups_are_accepted_when_someone_trusted_added_us() {
 }
 
 #[tokio::test]
+async fn photos_are_trusted_as_desktop_decides_to_download_them() {
+    let db = test_db().await;
+    let trusted = async |sid: &str| db.photo_trusted(sid).await.unwrap();
+    // Nobody we know: no.
+    assert!(!trusted("alice").await);
+    // An empty 1:1 chat isn't accepted for this (`ignoreEmptyConvo`), though
+    // it shows no message request.
+    let alice = conv("d:alice");
+    db.upsert_conversation(&alice, ConversationUpdate::default()).await.unwrap();
+    assert!(db.conversation(&alice).await.unwrap().unwrap().accepted);
+    assert!(!trusted("alice").await);
+    // Their message alone doesn't; our answer, a message of ours, profile
+    // sharing or the address book do.
+    db.insert_message(&incoming("d:alice", "alice", 10, "hi")).await.unwrap();
+    assert!(!trusted("alice").await);
+    db.set_message_request(&alice, MessageRequestResponse::Accept).await.unwrap();
+    assert!(trusted("alice").await);
+    db.set_message_request(&alice, MessageRequestResponse::Block).await.unwrap();
+    assert!(!trusted("alice").await);
+    db.insert_message(&outgoing("d:alice", 20, "hello")).await.unwrap();
+    assert!(trusted("alice").await);
+    db.set_profile_sharing(&conv("d:bob"), true).await.unwrap();
+    assert!(trusted("bob").await);
+    db.replace_system_contacts(&["carol".into()]).await.unwrap();
+    assert!(trusted("carol").await);
+
+    // Desktop's shared group (c1e8345): an accepted group we're both in.
+    let group = conv("g:aa");
+    let members = Some(vec!["me".to_owned(), "dave".to_owned()]);
+    db.upsert_conversation(&group, ConversationUpdate { kind: Some(ConversationKind::Group), members, ..Default::default() })
+        .await
+        .unwrap();
+    // Not accepted yet (nobody trusted added us).
+    assert!(!db.conversation(&group).await.unwrap().unwrap().accepted);
+    assert!(!trusted("dave").await);
+    db.set_message_request(&group, MessageRequestResponse::Accept).await.unwrap();
+    assert!(trusted("dave").await);
+    assert!(!trusted("erin").await, "not in the group");
+    // Not when they're blocked.
+    let dave = conv("d:dave");
+    db.upsert_conversation(&dave, ConversationUpdate::default()).await.unwrap();
+    db.set_blocked(&dave, true).await.unwrap();
+    assert!(!trusted("dave").await);
+    db.set_blocked(&dave, false).await.unwrap();
+    assert!(trusted("dave").await);
+    // Nor through a group we left, one that ended, or one we're only
+    // invited to.
+    db.set_left(&group, true).await.unwrap();
+    assert!(!trusted("dave").await);
+    db.set_left(&group, false).await.unwrap();
+    db.upsert_conversation(&group, ConversationUpdate { ended: Some(true), ..Default::default() }).await.unwrap();
+    assert!(!trusted("dave").await);
+    db.upsert_conversation(&group, ConversationUpdate { ended: Some(false), ..Default::default() }).await.unwrap();
+    assert!(trusted("dave").await);
+    let invited = GroupState { membership: Membership::Invited { by: None }, ..Default::default() };
+    db.upsert_conversation(&group, ConversationUpdate { group_state: Some(invited), ..Default::default() }).await.unwrap();
+    assert!(!trusted("dave").await);
+}
+
+#[tokio::test]
+async fn a_withheld_photo_shows_on_its_chat() {
+    let db = test_db().await;
+    let alice = conv("d:alice");
+    db.upsert_conversation(&alice, ConversationUpdate::default()).await.unwrap();
+    assert!(!db.conversation(&alice).await.unwrap().unwrap().avatar_withheld);
+    db.set_setting(&format!("{REMOTE_AVATAR}d:alice"), "profiles/abc").await.unwrap();
+    assert!(db.conversation(&alice).await.unwrap().unwrap().avatar_withheld);
+    assert_eq!(REMOTE_PERSON_AVATAR, format!("{REMOTE_AVATAR}{}", conv("d:").0));
+    assert_eq!(db.settings_with_prefix(REMOTE_PERSON_AVATAR).await.unwrap(), [("alice".to_owned(), "profiles/abc".to_owned())]);
+    // Which of them may now be downloaded: only the trusted, never a group's.
+    db.set_setting(&format!("{REMOTE_AVATAR}d:bob"), "profiles/def").await.unwrap();
+    db.set_setting(&format!("{REMOTE_AVATAR}g:aa"), "groups/1").await.unwrap();
+    assert!(db.withheld_photos_now_trusted().await.unwrap().is_empty());
+    db.set_profile_sharing(&conv("d:bob"), true).await.unwrap();
+    assert_eq!(db.withheld_photos_now_trusted().await.unwrap(), [("bob".to_owned(), "profiles/def".to_owned())]);
+    // Through a shared group too.
+    let group = conv("g:aa");
+    let members = Some(vec!["me".to_owned(), "alice".to_owned()]);
+    db.upsert_conversation(&group, ConversationUpdate { kind: Some(ConversationKind::Group), members, ..Default::default() })
+        .await
+        .unwrap();
+    db.set_message_request(&group, MessageRequestResponse::Accept).await.unwrap();
+    let mut now = db.withheld_photos_now_trusted().await.unwrap();
+    now.sort();
+    assert_eq!(now, [("alice".to_owned(), "profiles/abc".to_owned()), ("bob".to_owned(), "profiles/def".to_owned())]);
+}
+
+#[tokio::test]
 async fn spam_reports_name_the_newest_incoming_server_guids() {
     let db = test_db().await;
     let chat = conv("g:aa");

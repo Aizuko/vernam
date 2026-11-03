@@ -127,6 +127,9 @@ pub struct Conversation {
     pub group_state: GroupState,
     /// Decrypted avatar image on disk, if one has been downloaded.
     pub avatar_path: Option<String>,
+    /// It has a photo we haven't downloaded ([`REMOTE_AVATAR`]), which
+    /// Desktop draws as a gradient (`hasAvatar && !hasLocalImage`).
+    pub avatar_withheld: bool,
     /// Delivery status of the latest message when it is ours (for the
     /// conversation list's receipt icon); `None` when the latest is incoming.
     pub last_outgoing_status: Option<DeliveryStatus>,
@@ -474,6 +477,16 @@ pub const KEEP_MUTED_CHATS_ARCHIVED: &str = "keep_muted_chats_archived";
 /// formatting, JSON `StyleSpan`s over the conversation's `draft`. A
 /// settings row rather than a column, so no migration was needed.
 pub const DRAFT_STYLES: &str = "draft_styles:";
+
+/// Settings key prefix (followed by a conversation id, `d:` and their
+/// service id for a person): the CDN path of a photo we haven't downloaded
+/// because the chat isn't accepted (Desktop's `remoteAvatarUrl`, kept by
+/// `setAndMaybeFetchProfileAvatar` and `applyNewAvatar`). Removed once
+/// it's downloaded or they have no photo. A settings row rather than a
+/// column, so no migration was needed.
+pub const REMOTE_AVATAR: &str = "avatar.remote.";
+/// [`REMOTE_AVATAR`] for people: followed by their service id.
+pub const REMOTE_PERSON_AVATAR: &str = "avatar.remote.d:";
 
 /// The Signal chat's made-up account (Desktop's `SIGNAL_ACI`,
 /// `ts/types/SignalConversation.std.ts`): release notes appear from it, and
@@ -1023,6 +1036,14 @@ fn color_for(id: &str) -> u8 {
 /// the first byte of SHA-256 over the service id's binary form (16 bytes for
 /// an ACI, `0x01` and 16 for a PNI), modulo the palette size.
 pub fn avatar_color(service_id: &str) -> u8 {
+    identifier_hash(service_id) % AVATAR_COLORS
+}
+
+/// The first byte of SHA-256 over the service id's binary form, as
+/// [`avatar_color`] reads it: Desktop's `getIdentifierHash`
+/// (`ts/Crypto.node.ts`), which also picks an undownloaded photo's
+/// gradient.
+pub fn identifier_hash(service_id: &str) -> u8 {
     let (prefix, uuid) = match service_id.strip_prefix("PNI:") {
         Some(uuid) => (Some(1u8), uuid),
         None => (None, service_id),
@@ -1032,17 +1053,21 @@ pub fn avatar_color(service_id: &str) -> u8 {
         .then(|| (0..32).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect())
         .flatten();
     match bytes {
-        Some(bytes) => avatar_color_of_bytes(&prefix.into_iter().chain(bytes).collect::<Vec<_>>()),
+        Some(bytes) => identifier_hash_of_bytes(&prefix.into_iter().chain(bytes).collect::<Vec<_>>()),
         // Not a service id (e.g. a phone number): Desktop hashes the text.
-        None => avatar_color_of_bytes(service_id.as_bytes()),
+        None => identifier_hash_of_bytes(service_id.as_bytes()),
     }
 }
 
 /// The first byte of SHA-256 over `identifier`, modulo the palette (also
 /// how Signal colors a group, from its group id).
 pub fn avatar_color_of_bytes(identifier: &[u8]) -> u8 {
+    identifier_hash_of_bytes(identifier) % AVATAR_COLORS
+}
+
+pub fn identifier_hash_of_bytes(identifier: &[u8]) -> u8 {
     use sha2::Digest as _;
-    sha2::Sha256::digest(identifier)[0] % AVATAR_COLORS
+    sha2::Sha256::digest(identifier)[0]
 }
 
 fn now_millis() -> i64 {
@@ -1115,6 +1140,7 @@ const CONVERSATION_COLUMNS: &str = "id, kind, title, phone, color, members, last
      last_message_at, unread_count, pinned, (muted_until > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) AS muted, muted_until, archived, \
      marked_unread, blocked, draft, \
      (SELECT value FROM settings WHERE key = 'draft_styles:' || conversations.id) AS draft_styles, expire_timer, expire_timer_version, can_edit_info, left_group, description, admins, member_labels, can_label, can_add_members, group_ended, group_state, avatar_path, \
+     EXISTS (SELECT 1 FROM settings WHERE key = 'avatar.remote.' || conversations.id) AS avatar_withheld, \
      (SELECT CASE WHEN m.direction = 1 AND m.deleted = 0 THEN m.status END FROM messages m \
       WHERE m.conversation_id = conversations.id AND m.notice IS NULL ORDER BY m.sent_at DESC, m.id DESC LIMIT 1) \
       AS last_outgoing_status, \
@@ -1132,6 +1158,31 @@ const CONVERSATION_COLUMNS: &str = "id, kind, title, phone, color, members, last
           AND added_by IS NOT NULL \
           AND (EXISTS (SELECT 1 FROM system_contacts s WHERE s.service_id = conversations.added_by) \
                OR EXISTS (SELECT 1 FROM profile_sharing p WHERE p.id = 'd:' || conversations.added_by)))) AS accepted";
+
+/// The groups through which someone's photo is trusted (see
+/// [`AppDb::photo_trusted`]): accepted, not ended, and ones we're a member
+/// of (not left, invited or asking to join).
+fn trusted_groups_cte() -> String {
+    format!(
+        "WITH trusted_groups AS (SELECT id, members FROM (SELECT {CONVERSATION_COLUMNS} FROM conversations \
+             WHERE kind = 'group' AND group_ended = 0 AND left_group = 0 \
+             AND COALESCE(json_extract(group_state, '$.membership.kind'), 'member') = 'member') \
+           WHERE accepted)"
+    )
+}
+
+/// Whether the person `sid` (an SQL expression), with 1:1 chat id
+/// `direct`, is [`AppDb::photo_trusted`]; needs [`trusted_groups_cte`].
+fn photo_trusted_sql(sid: &str, direct: &str) -> String {
+    format!(
+        "(EXISTS (SELECT 1 FROM conversations WHERE id = {direct} AND message_request = 1) \
+         OR EXISTS (SELECT 1 FROM profile_sharing WHERE id = {direct}) \
+         OR EXISTS (SELECT 1 FROM system_contacts WHERE service_id = {sid}) \
+         OR EXISTS (SELECT 1 FROM messages WHERE conversation_id = {direct} AND author_key = '' AND notice IS NULL) \
+         OR (NOT EXISTS (SELECT 1 FROM conversations WHERE id = {direct} AND blocked = 1) \
+             AND EXISTS (SELECT 1 FROM trusted_groups g, json_each(g.members) j WHERE j.value = {sid})))"
+    )
+}
 
 const MESSAGE_COLUMNS: &str = "id, conversation_id, sent_at, received_at, direction, author, \
      author_name, body, status, reactions, quote, attachments, link_preview, deleted, edited, expires_in, expire_start, edit_count, notice, mentions, styles, cta, deleted_by_admin, long_text, poll, view_once, sealed_sender, is_read, content";
@@ -1315,6 +1366,7 @@ fn conversation_from_row(row: &SqliteRow) -> Result<Conversation> {
             .transpose()?
             .unwrap_or_default(),
         avatar_path: row.try_get("avatar_path")?,
+        avatar_withheld: row.try_get("avatar_withheld")?,
         last_outgoing_status: row.try_get::<Option<i64>, _>("last_outgoing_status")?.map(status_from_i64),
         unread_poll_votes: row.try_get("unread_poll_votes")?,
         accepted: row.try_get("accepted")?,
@@ -1663,6 +1715,35 @@ impl AppDb {
     pub async fn remove_person_avatar(&self, service_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM person_avatars WHERE service_id = ?").bind(service_id).execute(&self.writer).await?;
         Ok(())
+    }
+
+    /// Whether someone's profile photo may be downloaded without being
+    /// asked (Desktop's `setAndMaybeFetchProfileAvatar`): their 1:1 chat is
+    /// accepted, not counting an empty one as accepted
+    /// (`getAccepted({ ignoreEmptyConvo: true })`), or they're not blocked
+    /// and are in an accepted group, not ended, that we're a member of.
+    /// (Desktop also leaves out someone unregistered, which isn't kept here.)
+    pub async fn photo_trusted(&self, service_id: &str) -> Result<bool> {
+        let sql = format!("{} SELECT {}", trusted_groups_cte(), photo_trusted_sql("?1", "?2"));
+        let direct = ConversationId::direct(service_id);
+        Ok(sqlx::query_scalar(AssertSqlSafe(sql)).bind(service_id).bind(&direct.0).fetch_one(&self.pool).await?)
+    }
+
+    /// `(service id, path)` of each person whose photo was withheld
+    /// ([`REMOTE_AVATAR`]) and who is now [`Self::photo_trusted`]: in one
+    /// query, as a sync asks after all of them.
+    pub async fn withheld_photos_now_trusted(&self) -> Result<Vec<(String, String)>> {
+        // The key's service id and conversation id (SQLite counts from 1).
+        let sid = format!("substr(w.key, {})", REMOTE_PERSON_AVATAR.len() + 1);
+        let direct = format!("substr(w.key, {})", REMOTE_AVATAR.len() + 1);
+        let sql = format!(
+            "{}, w AS (SELECT key, value FROM settings WHERE key >= ?1 AND key < ?2) \
+             SELECT {sid}, w.value FROM w WHERE {}",
+            trusted_groups_cte(),
+            photo_trusted_sql(&sid, &direct)
+        );
+        let upper = format!("{REMOTE_AVATAR}d;");
+        Ok(sqlx::query_as(AssertSqlSafe(sql)).bind(REMOTE_PERSON_AVATAR).bind(upper).fetch_all(&self.pool).await?)
     }
 
     /// One person's downloaded profile photo.

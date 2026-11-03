@@ -638,6 +638,7 @@ impl ReviewPerson {
             ended: false,
             group_state: Default::default(),
             avatar_path: None,
+            avatar_withheld: false,
             last_outgoing_status: None,
             unread_poll_votes: false,
             accepted: true,

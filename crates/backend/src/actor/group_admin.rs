@@ -426,10 +426,15 @@ impl Actor {
             ..Default::default()
         };
         self.db.upsert_conversation(&conversation, update).await?;
+        // Joining is accepting: Desktop shares our profile with the group
+        // (`joinViaLink.preload.ts`, `profileSharing: true`).
+        let _ = self.db.set_profile_sharing(&conversation, true).await;
         if !info.avatar.is_empty()
             && let Some(file) = self.save_link_avatar(&manager, key, &info.avatar).await
         {
             let _ = self.db.set_avatar(&conversation, file.to_str()).await;
+            // Shown now, so not withheld (from an invite before).
+            self.forget_withheld_photo(&conversation).await;
         }
         if approval {
             let password = base64::engine::general_purpose::STANDARD.encode(password);
