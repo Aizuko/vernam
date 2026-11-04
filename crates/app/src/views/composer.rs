@@ -20,7 +20,7 @@ use signal_emoji::{Emoji, SearchOptions};
 use signal_store::{ConversationId, ConversationKind, Message};
 
 use crate::recorder::Recording;
-use crate::rich_input::{RichInput, RichInputEvent};
+use crate::rich_input::{MenuClick, RichInput, RichInputEvent};
 use crate::state::AppState;
 use crate::theme::Palette;
 use crate::views::common::ClosedByClick;
@@ -229,6 +229,10 @@ pub struct Composer {
     /// The pointer is over the composer (Desktop shows its expand tab then).
     hovered: bool,
     spelling: Spelling,
+    /// The misspelling each right-click menu offered suggestions for
+    /// (tests can't read a native menu).
+    #[cfg(test)]
+    menu_words: std::cell::RefCell<Vec<Option<Range<usize>>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -255,8 +259,8 @@ impl Composer {
         });
         let composer = cx.entity().downgrade();
         input.update(cx, |input, _| {
-            input.set_context_menu(move |menu, _, cx| match composer.upgrade() {
-                Some(composer) => composer.read(cx).spelling_menu(menu, cx),
+            input.set_context_menu(move |menu, click, _, cx| match composer.upgrade() {
+                Some(composer) => composer.update(cx, |this, cx| this.spelling_menu(menu, click, cx)),
                 None => menu,
             })
         });
@@ -368,6 +372,8 @@ impl Composer {
             large: false,
             hovered: false,
             spelling: Spelling::default(),
+            #[cfg(test)]
+            menu_words: Default::default(),
             _recording_poll: None,
             _subscriptions: subscriptions,
         };
@@ -399,6 +405,14 @@ impl Composer {
     /// The misspellings to underline now: carried over to the text as it
     /// is, without mentions, links, or the word being typed.
     fn marked_misspellings(&self, cx: &App) -> Vec<Range<usize>> {
+        let input = self.input.read(cx);
+        let caret = input.selected_range().is_empty().then(|| input.cursor());
+        self.misspellings(caret, cx)
+    }
+
+    /// The misspellings in the text as it is, without mentions or links,
+    /// or the word the caret (if given) is at the end of.
+    fn misspellings(&self, caret: Option<usize>, cx: &App) -> Vec<Range<usize>> {
         if !self.state.read(cx).prefs.on(crate::prefs::Toggle::SpellCheck) {
             return Vec::new();
         }
@@ -409,9 +423,31 @@ impl Composer {
         for (label, _) in &self.mentions {
             skip.extend(text.match_indices(label.as_str()).map(|(at, m)| at..at + m.len()));
         }
-        let selection = input.selected_range();
-        let caret = selection.is_empty().then(|| input.cursor());
         crate::spelling::marked(&found, &skip, caret)
+    }
+
+    /// The misspelling a right-click menu offers suggestions for, as
+    /// Chromium picks it for Desktop: a click outside the selection
+    /// selects the misspelling there (`SelectClosestMisspellingFromHitTestResult`),
+    /// and one inside keeps the selection, which must then be the
+    /// misspelling, give or take spaces and punctuation
+    /// (`SpellChecker::SelectMisspellingAsync`). The word being typed
+    /// counts: it's underlined once the click selects it.
+    fn misspelling_for_menu(&mut self, click: MenuClick, cx: &mut Context<Self>) -> Option<Range<usize>> {
+        let found = self.misspellings(None, cx);
+        if !click.in_selection {
+            let range = crate::spelling::at(&found, click.at)?;
+            self.input.update(cx, |input, cx| input.select_range(range.clone(), cx));
+            return Some(range);
+        }
+        let input = self.input.read(cx);
+        let (text, selection) = (input.value(), input.selected_range());
+        let trim = |s: &str| s.trim_matches(|c: char| !c.is_alphanumeric()).to_owned();
+        let selected = trim(text.get(selection.clone()).unwrap_or_default());
+        found
+            .into_iter()
+            .find(|r| r.start < selection.end && selection.start < r.end)
+            .filter(|r| text.get(r.clone()).is_some_and(|word| trim(word) == selected))
     }
 
     /// Desktop's spell check menu (`app/spell_check.main.ts`): on a
@@ -419,16 +455,20 @@ impl Composer {
     /// then Undo, Redo, Cut, Copy, Paste and Select All. (No "Add to
     /// dictionary", as Desktop.)
     fn spelling_menu(
-        &self,
+        &mut self,
         menu: gpui_kit::component::native_menu::NativeMenu,
-        cx: &App,
+        click: MenuClick,
+        cx: &mut Context<Self>,
     ) -> gpui_kit::component::native_menu::NativeMenu {
         use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+        let misspelling = self.misspelling_for_menu(click, cx);
+        #[cfg(test)]
+        self.menu_words.borrow_mut().push(misspelling.clone());
         let input = self.input.read(cx);
         let text = input.value().to_string();
         let selected = !input.selected_range().is_empty();
         let mut menu = menu;
-        if let Some(range) = crate::spelling::at(&self.spelling.marked, input.cursor()) {
+        if let Some(range) = misspelling {
             let word = text.get(range.clone()).unwrap_or_default().to_owned();
             let guesses = crate::spelling::guesses(&text, range.clone());
             if guesses.is_empty() {
@@ -3260,39 +3300,82 @@ mod tests {
         assert!(marked(&mut vcx).is_empty());
     }
 
-    /// Right-clicking the input once aborted the app: the spelling menu
-    /// read the input while the click was still updating it.
+    /// The right-click menu offers suggestions as Chromium does for
+    /// Desktop. (Right-clicking once aborted the app: the menu read the
+    /// input while the click was still updating it.)
     #[gpui_kit::test]
-    fn right_clicking_a_misspelling_builds_the_menu(cx: &mut TestAppContext) {
-        let f = mount(cx);
-        let target = input_id(&f, cx);
+    fn right_clicking_a_misspelling_selects_it_and_offers_suggestions(cx: &mut TestAppContext) {
+        let f = mount_with_keys(cx);
+        // Three lines down, below where the test's window puts the
+        // formatting popover. The last word is still being typed, so it
+        // isn't underlined.
+        type_in(&f, cx, "\n\n\nThiss is a tesst, ok tesst");
         let mut vcx = gpui_kit::VisualTestContext::from_window(f.window, cx);
-        vcx.update(|window, cx| {
-            window.click(target.clone(), cx);
-            window.input("Thiss is fine ", cx);
-        });
-        vcx.executor().advance_clock(SPELL_CHECK_PAUSE + Duration::from_millis(50));
-        let mut marked = Vec::new();
-        for _ in 0..200 {
+        let checked = |vcx: &mut gpui_kit::VisualTestContext, count: usize| {
+            vcx.executor().advance_clock(SPELL_CHECK_PAUSE + Duration::from_millis(50));
+            let mut found = Vec::new();
+            for _ in 0..200 {
+                vcx.update(|window, _| window.refresh());
+                vcx.run_until_parked();
+                found = vcx.update(|_, cx| f.composer.read(cx).spelling.found.clone());
+                if found.len() >= count {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            found
+        };
+        assert_eq!(checked(&mut vcx, 3), [3..8, 14..19, 24..29]);
+        let marked = |vcx: &mut gpui_kit::VisualTestContext| {
             vcx.update(|window, _| window.refresh());
             vcx.run_until_parked();
-            marked = vcx.update(|_, cx| f.composer.read(cx).spelling.marked.clone());
-            if !marked.is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(marked.contains(&(0..5)), "{marked:?}");
-        // On "Thiss": the menu offers its suggestions.
-        let word = vcx.update(|_, cx| f.composer.read(cx).input.read(cx).range_to_bounds(&(1..2))).unwrap();
-        vcx.simulate_mouse_down(word.center(), gpui_kit::MouseButton::Right, gpui_kit::Modifiers::none());
-        vcx.run_until_parked();
-        let (built, cursor) = vcx.update(|_, cx| {
-            let input = f.composer.read(cx).input.read(cx);
-            (input.menus_built, input.cursor())
-        });
-        assert_eq!(built, 1);
-        assert!(crate::spelling::at(&marked, cursor).is_some(), "caret {cursor} is in the misspelling");
+            vcx.update(|_, cx| f.composer.read(cx).spelling.marked.clone())
+        };
+        assert!(!marked(&mut vcx).contains(&(24..29)));
+
+        let input = vcx.update(|_, cx| f.composer.read(cx).input.clone());
+        let bounds = |vcx: &mut gpui_kit::VisualTestContext, char: usize| {
+            vcx.update(|_, cx| input.read(cx).range_to_bounds(&(char..char + 1))).unwrap()
+        };
+        // The misspelling the menu built for a right-click at `at` offers.
+        let mut built = 0;
+        let mut right_click = |vcx: &mut gpui_kit::VisualTestContext, at: gpui_kit::Point<gpui_kit::Pixels>| {
+            vcx.simulate_mouse_down(at, gpui_kit::MouseButton::Right, gpui_kit::Modifiers::none());
+            vcx.run_until_parked();
+            built += 1;
+            vcx.update(|_, cx| {
+                assert_eq!(input.read(cx).menus_built, built);
+                f.composer.read(cx).menu_words.borrow().last().cloned().unwrap()
+            })
+        };
+        let selection = |vcx: &mut gpui_kit::VisualTestContext| vcx.update(|_, cx| input.read(cx).selected_range());
+
+        // On the word being typed: it's selected, and so underlined.
+        let at = bounds(&mut vcx, 26).center();
+        assert_eq!(right_click(&mut vcx, at), Some(24..29));
+        assert_eq!(selection(&mut vcx), 24..29);
+        assert!(marked(&mut vcx).contains(&(24..29)));
+        // Again, in the selection that's just the word: still offered.
+        let at = bounds(&mut vcx, 25).center();
+        assert_eq!(right_click(&mut vcx, at), Some(24..29));
+        // Past the end of the line: the word before.
+        let end = bounds(&mut vcx, 28);
+        let at = gpui_kit::point(end.right() + px(40.), end.center().y);
+        assert_eq!(right_click(&mut vcx, at), Some(24..29));
+        // The comma after a misspelling: its left edge is the word's end,
+        // its right edge isn't.
+        let comma = bounds(&mut vcx, 19);
+        let at = gpui_kit::point(comma.right() - px(0.5), comma.center().y);
+        assert_eq!(right_click(&mut vcx, at), None);
+        assert_eq!(selection(&mut vcx), 20..20, "the caret moves");
+        let at = gpui_kit::point(comma.left() + px(0.5), comma.center().y);
+        assert_eq!(right_click(&mut vcx, at), Some(14..19));
+        // In a selection of more than the word: none offered, and the
+        // selection stays.
+        vcx.simulate_keystrokes("cmd-a");
+        let at = bounds(&mut vcx, 15).center();
+        assert_eq!(right_click(&mut vcx, at), None);
+        assert_eq!(selection(&mut vcx), 0..29);
     }
 
     #[gpui_kit::test]

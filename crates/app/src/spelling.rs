@@ -139,7 +139,10 @@ pub fn carry_over(checked: &str, found: &[Range<usize>], now: &str) -> Vec<Range
         .collect()
 }
 
-/// The misspelling a right-click at byte `at` lands on.
+/// The misspelling a right-click at byte `at` (the caret offset nearest
+/// it) lands on. Its end counts, as Chromium's `FirstMarkerAroundPosition`
+/// takes the word around the position: just past a word, or on the left
+/// half of a comma after it, finds the word.
 pub fn at(marked: &[Range<usize>], at: usize) -> Option<Range<usize>> {
     marked.iter().find(|r| r.start <= at && at <= r.end).cloned()
 }
@@ -184,6 +187,7 @@ mod tests {
         assert_eq!(carry_over(checked, &found, "helox wrld bye"), [6..10]);
         assert_eq!(at(&[0..4, 8..12], 10), Some(8..12));
         assert_eq!(at(&[0..4], 6), None);
+        assert_eq!(at(&[0..4], 4), Some(0..4), "just past it");
     }
 
     /// macOS's checker, headless: obvious misspellings are found, and a

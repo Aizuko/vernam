@@ -51,9 +51,20 @@ const UNDO_LIMIT: usize = 200;
 /// How long the caret shows, then hides, as it blinks (macOS's 500 ms).
 const CARET_BLINK: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Builds the right-click menu from an empty one. It runs after the
-/// click's update, so it may read this input's entity.
-type MenuBuilder = Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>;
+/// Builds the right-click menu from an empty one, given where the click
+/// landed. It runs after the click's update, so it may read and update
+/// this input's entity.
+type MenuBuilder = Rc<dyn Fn(NativeMenu, MenuClick, &mut Window, &mut App) -> NativeMenu>;
+
+/// Where a right-click landed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuClick {
+    /// The caret offset nearest the click.
+    pub at: usize,
+    /// Whether it was in the selection, which it then keeps; otherwise the
+    /// caret moved to `at`.
+    pub in_selection: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RichInputEvent {
@@ -229,7 +240,7 @@ impl RichInput {
 
     /// Replaces the menu shown on a right click (by default Cut, Copy,
     /// Paste and Select All).
-    pub fn set_context_menu(&mut self, menu: impl Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static) {
+    pub fn set_context_menu(&mut self, menu: impl Fn(NativeMenu, MenuClick, &mut Window, &mut App) -> NativeMenu + 'static) {
         self.context_menu = Some(Rc::new(menu));
     }
 
@@ -250,6 +261,12 @@ impl RichInput {
         let text = self.text[start..end].to_owned();
         let spans = self.styles.slice(start..end).to_spans(&text);
         (text, spans)
+    }
+
+    /// Selects `range` (clamped to the text's character boundaries).
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let (start, end) = (self.clamp(range.start), self.clamp(range.end));
+        self.select(start.min(end)..start.max(end), false, cx);
     }
 
     pub fn selected_range(&self) -> Range<usize> {
@@ -867,10 +884,12 @@ impl RichInput {
     fn right_click(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus(window, cx);
         let at = self.offset_for_point(event.position);
-        if !(self.selected.start <= at && at <= self.selected.end && !self.selected.is_empty()) {
+        let in_selection = self.selected.start <= at && at <= self.selected.end && !self.selected.is_empty();
+        if !in_selection {
             self.move_to(at, cx);
         }
         let selected = !self.selected.is_empty();
+        let click = MenuClick { at, in_selection };
         let build = self.context_menu.clone();
         let position = event.position;
         #[cfg(test)]
@@ -879,7 +898,7 @@ impl RichInput {
         // (the composer's spelling suggestions do) would panic inside it.
         window.defer(cx, move |window, cx| {
             let menu = match build {
-                Some(build) => build(NativeMenu::new(), window, cx),
+                Some(build) => build(NativeMenu::new(), click, window, cx),
                 None => NativeMenu::new()
                     .menu_with_disabled("Cut", !selected, Box::new(Cut))
                     .menu_with_disabled("Copy", !selected, Box::new(Copy))
