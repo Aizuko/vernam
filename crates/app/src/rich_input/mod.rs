@@ -51,7 +51,8 @@ const UNDO_LIMIT: usize = 200;
 /// How long the caret shows, then hides, as it blinks (macOS's 500 ms).
 const CARET_BLINK: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Builds the right-click menu from an empty one.
+/// Builds the right-click menu from an empty one. It runs after the
+/// click's update, so it may read this input's entity.
 type MenuBuilder = Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,6 +111,9 @@ pub struct RichInput {
     /// Scroll the caret into view at the next layout.
     reveal: bool,
     context_menu: Option<MenuBuilder>,
+    /// Right-click menus built (tests can't show a native menu).
+    #[cfg(test)]
+    pub menus_built: usize,
     /// The caret's blink: shown, and the task that blinks it while focused.
     caret_on: bool,
     _blink: Option<Task<()>>,
@@ -165,6 +169,8 @@ impl RichInput {
             scroll_y: px(0.),
             reveal: false,
             context_menu: None,
+            #[cfg(test)]
+            menus_built: 0,
             caret_on: true,
             _blink: None,
             _subscriptions: subscriptions,
@@ -865,17 +871,30 @@ impl RichInput {
             self.move_to(at, cx);
         }
         let selected = !self.selected.is_empty();
-        let menu = match self.context_menu.clone() {
-            Some(build) => build(NativeMenu::new(), window, cx),
-            None => NativeMenu::new()
-                .menu_with_disabled("Cut", !selected, Box::new(Cut))
-                .menu_with_disabled("Copy", !selected, Box::new(Copy))
-                .menu("Paste", Box::new(Paste))
-                .separator()
-                .menu("Select All", Box::new(SelectAll)),
-        };
+        let build = self.context_menu.clone();
         let position = event.position;
-        window.defer(cx, move |window, cx| menu.show(position, window, cx));
+        #[cfg(test)]
+        let this = cx.entity().downgrade();
+        // Built once this update ends: a builder that reads this input
+        // (the composer's spelling suggestions do) would panic inside it.
+        window.defer(cx, move |window, cx| {
+            let menu = match build {
+                Some(build) => build(NativeMenu::new(), window, cx),
+                None => NativeMenu::new()
+                    .menu_with_disabled("Cut", !selected, Box::new(Cut))
+                    .menu_with_disabled("Copy", !selected, Box::new(Copy))
+                    .menu("Paste", Box::new(Paste))
+                    .separator()
+                    .menu("Select All", Box::new(SelectAll)),
+            };
+            #[cfg(test)]
+            {
+                let _ = (menu, position);
+                this.update(cx, |this, _| this.menus_built += 1).ok();
+            }
+            #[cfg(not(test))]
+            menu.show(position, window, cx);
+        });
     }
 
     fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {

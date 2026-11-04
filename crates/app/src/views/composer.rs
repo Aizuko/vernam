@@ -3260,6 +3260,41 @@ mod tests {
         assert!(marked(&mut vcx).is_empty());
     }
 
+    /// Right-clicking the input once aborted the app: the spelling menu
+    /// read the input while the click was still updating it.
+    #[gpui_kit::test]
+    fn right_clicking_a_misspelling_builds_the_menu(cx: &mut TestAppContext) {
+        let f = mount(cx);
+        let target = input_id(&f, cx);
+        let mut vcx = gpui_kit::VisualTestContext::from_window(f.window, cx);
+        vcx.update(|window, cx| {
+            window.click(target.clone(), cx);
+            window.input("Thiss is fine ", cx);
+        });
+        vcx.executor().advance_clock(SPELL_CHECK_PAUSE + Duration::from_millis(50));
+        let mut marked = Vec::new();
+        for _ in 0..200 {
+            vcx.update(|window, _| window.refresh());
+            vcx.run_until_parked();
+            marked = vcx.update(|_, cx| f.composer.read(cx).spelling.marked.clone());
+            if !marked.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(marked.contains(&(0..5)), "{marked:?}");
+        // On "Thiss": the menu offers its suggestions.
+        let word = vcx.update(|_, cx| f.composer.read(cx).input.read(cx).range_to_bounds(&(1..2))).unwrap();
+        vcx.simulate_mouse_down(word.center(), gpui_kit::MouseButton::Right, gpui_kit::Modifiers::none());
+        vcx.run_until_parked();
+        let (built, cursor) = vcx.update(|_, cx| {
+            let input = f.composer.read(cx).input.read(cx);
+            (input.menus_built, input.cursor())
+        });
+        assert_eq!(built, 1);
+        assert!(crate::spelling::at(&marked, cursor).is_some(), "caret {cursor} is in the misspelling");
+    }
+
     #[gpui_kit::test]
     fn selected_text_gets_the_formatting_popover(cx: &mut TestAppContext) {
         let f = mount(cx);
