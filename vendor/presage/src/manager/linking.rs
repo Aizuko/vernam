@@ -12,7 +12,7 @@ use rand::{
     distr::{Alphanumeric, SampleString},
     rng, RngCore,
 };
-use tracing::info;
+use tracing::{debug, info};
 use url::Url;
 
 use crate::manager::registered::RegistrationData;
@@ -93,7 +93,7 @@ impl<S: Store> Manager<S, Linking> {
             ),
             async move {
                 if let Some(SecondaryDeviceProvisioning::Url(url)) = rx.next().await {
-                    info!("generating qrcode from provisioning link: {}", &url);
+                    debug!("generating qrcode from provisioning link: {}", &url);
                     if provisioning_link_channel.send(url).is_err() {
                         return Err(Error::LinkingError);
                     }
@@ -181,6 +181,11 @@ impl<S: Store> Manager<S, Linking> {
                     store: store.clone(),
                     state: Registered::with_data(registration_data),
                 };
+
+                // signal-gpui: no group sync from Storage Service here. The
+                // app's own Storage Service sync makes chats for the groups
+                // listed there and fetches each from the group server on its
+                // own schedule, a bounded number at a time.
 
                 Ok(manager)
             }

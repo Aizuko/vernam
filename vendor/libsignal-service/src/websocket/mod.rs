@@ -26,6 +26,7 @@ use crate::proto::{
 use crate::push_service::{self, ServiceError, SignalServiceResponse};
 
 pub mod account;
+pub mod calling;
 pub mod connection_info;
 #[cfg(feature = "cdsi")]
 pub mod directory;
@@ -294,8 +295,12 @@ impl SignalWebSocketProcess {
     }
 
     async fn run(mut self) -> Result<(), ServiceError> {
+        // A keepalive sent before the server registers our presence makes it close the socket.
+        // When it opened, by tokio's clock (which tests move) and the wall
+        // clock (which, unlike tokio's, runs while the machine sleeps).
+        let opened = (Instant::now(), SystemTime::now());
         let mut ka_interval = tokio::time::interval_at(
-            Instant::now(),
+            Instant::now() + push_service::KEEPALIVE_TIMEOUT_SECONDS,
             push_service::KEEPALIVE_TIMEOUT_SECONDS,
         );
 
@@ -333,7 +338,15 @@ impl SignalWebSocketProcess {
                         self.close().await;
                         break;
                     }
-                    if self.check.is_none() {
+                    // A socket younger than one keepalive interval can't be
+                    // stale, and a keepalive this early gets it closed (see
+                    // `ka_interval`). Young by both clocks: after a sleep
+                    // only the wall clock has moved on (a wall clock set
+                    // back since then counts as young; tokio's still says).
+                    let young = |age: Duration| age < push_service::KEEPALIVE_TIMEOUT_SECONDS;
+                    if young(opened.0.elapsed()) && opened.1.elapsed().map_or(true, young) {
+                        tracing::debug!("websocket just opened; not checking it");
+                    } else if self.check.is_none() {
                         tracing::debug!("checking the websocket");
                         match self.send_keep_alive().await {
                             Ok(id) => self.check = Some((id, Box::pin(tokio::time::sleep(CHECK_TIMEOUT)))),

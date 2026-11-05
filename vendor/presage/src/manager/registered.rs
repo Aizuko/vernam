@@ -39,6 +39,7 @@ use libsignal_service::{
     websocket::{
         self,
         account::{AccountAttributes, DeviceCapabilities, DeviceInfo, WhoAmIResponse},
+        calling::TurnServer,
         SignalWebSocket,
     },
     zkgroup::{
@@ -1002,6 +1003,11 @@ impl<S: Store> Manager<S, Registered> {
                                         }
                                     }
 
+                                    // signal-gpui: a FetchLatest for the storage manifest
+                                    // goes to the app, whose Storage Service sync handles
+                                    // groups (see linking.rs); fetching every unknown group
+                                    // here would hold up receiving.
+
                                     // group update
                                     if let ContentBody::DataMessage(DataMessage {
                                         group_v2:
@@ -1230,6 +1236,9 @@ impl<S: Store> Manager<S, Registered> {
         let mut content_body: ContentBody = message.into();
 
         self.restore_thread_timer(&thread, &mut content_body).await;
+        // signal-gpui: no automatic link preview. The app builds previews
+        // itself, only when the user's setting allows and they didn't
+        // dismiss it, and fetches only public addresses.
 
         let sender_certificate = self.sender_certificate().await?;
         let unidentified_access = self
@@ -1414,6 +1423,9 @@ impl<S: Store> Manager<S, Registered> {
         let thread = Thread::Group(master_key_bytes);
 
         self.restore_thread_timer(&thread, &mut content_body).await;
+        // signal-gpui: no automatic link preview. The app builds previews
+        // itself, only when the user's setting allows and they didn't
+        // dismiss it, and fetches only public addresses.
         ensure_data_message_timestamp(&mut content_body, timestamp);
 
         let mut sender = self.new_message_sender().await?;
@@ -1891,6 +1903,63 @@ impl<S: Store> Manager<S, Registered> {
         Ok(())
     }
 
+    /// Records a finished call in the thread with the peer of `event` and tells our other
+    /// devices about it, so their call logs agree. Returns the stored content.
+    pub async fn send_call_event(
+        &mut self,
+        event: sync_message::CallEvent,
+    ) -> Result<Content, Error<S::Error>> {
+        let sync_message = SyncMessage {
+            content: Some(SyncContent::CallEvent(event.clone())),
+            ..SyncMessage::with_padding(&mut rand::rng())
+        };
+        self.new_message_sender()
+            .await?
+            .send_sync_message(sync_message.clone())
+            .await?;
+
+        let aci = self.state.data.service_ids.aci();
+        // Filed under the start of the call.
+        let timestamp = event
+            .timestamp
+            .and_then(|ts| chrono::Utc.timestamp_millis_opt(ts as i64).single())
+            .unwrap_or_else(chrono::Utc::now);
+        let content = Content {
+            metadata: Metadata {
+                sender: aci.into(),
+                sender_device: self.state.device_id(),
+                destination: aci.into(),
+                server_guid: None,
+                client_timestamp: timestamp,
+                server_timestamp: timestamp,
+                needs_receipt: false,
+                unidentified_sender: false,
+                was_plaintext: false,
+                pni_verified: None,
+            },
+            body: ContentBody::SynchronizeMessage(sync_message),
+        };
+
+        let mut identified_websocket = self.identified_websocket(false).await?;
+        save_message(
+            &mut self.store,
+            &mut identified_websocket,
+            content.clone(),
+            None,
+        )
+        .await?;
+        Ok(content)
+    }
+
+    /// Fetches short-lived TURN credentials for 1:1 calls.
+    pub async fn calling_relays(&self) -> Result<Vec<TurnServer>, Error<S::Error>> {
+        Ok(self
+            .identified_websocket(false)
+            .await?
+            .get_calling_relays()
+            .await?)
+    }
+
     fn credentials(&self) -> ServiceCredentials {
         self.state.credentials()
     }
@@ -2050,6 +2119,27 @@ impl<S: Store> Manager<S, Registered> {
         self.identified_websocket(false)
             .await?
             .unlink_device(self.device_id())
+            .await?;
+        Ok(())
+    }
+
+    /// Update the name of this device.
+    pub async fn update_device_name(&mut self, name: &str) -> Result<(), Error<S::Error>> {
+        let aci = self.state.data.service_ids.aci;
+        let aci_protocol_store = self.store.aci_protocol_store();
+        let mut account_manager = AccountManager::new(
+            self.identified_push_service(),
+            self.identified_websocket(false).await?,
+            Some(self.state.data.profile_key),
+        );
+        account_manager
+            .update_device_name(
+                self.device_id(),
+                name,
+                aci.into(),
+                &aci_protocol_store,
+                &mut rng(),
+            )
             .await?;
         Ok(())
     }
@@ -2305,10 +2395,10 @@ async fn save_message<S: Store>(
             for d in delete.message_deletes.iter().flat_map(|m| &m.messages) {
                 let sender = match &d.author {
                     Some(Author::AuthorServiceId(id)) => {
-                        ServiceId::parse_from_service_id_string(&id)
+                        ServiceId::parse_from_service_id_string(id)
                     }
                     Some(Author::AuthorServiceIdBinary(id)) => {
-                        ServiceId::parse_from_service_id_binary(&id)
+                        ServiceId::parse_from_service_id_binary(id)
                     }
                     Some(Author::AuthorE164(_)) => None,
                     None => None,
@@ -2357,8 +2447,9 @@ async fn save_message<S: Store>(
                 })),
             ..
         }) => Some(message),
-        ContentBody::CallMessage(_)
-        | ContentBody::SynchronizeMessage(SyncMessage {
+        // Call signaling is transient; calls are recorded by `CallEvent`s instead.
+        ContentBody::CallMessage(_) => None,
+        ContentBody::SynchronizeMessage(SyncMessage {
             content: Some(SyncContent::CallEvent(_)),
             ..
         }) => Some(message),

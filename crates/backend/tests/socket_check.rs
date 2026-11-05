@@ -1,7 +1,8 @@
 //! The connection check after the machine wakes (libsignal-service's
 //! `SignalWebSocket::check`, as Desktop's `checkSockets`), against a local
 //! server: one that doesn't answer is closed after the check's 30 seconds
-//! rather than at the next keepalive, and one that answers stays open.
+//! rather than at the next keepalive, one that answers stays open, and one
+//! just opened isn't checked.
 
 use std::time::Duration;
 
@@ -62,29 +63,56 @@ async fn settle() {
     }
 }
 
+/// Past the first keepalive interval (55 seconds; a check before then is
+/// skipped), with tokio's clock paused: the interval's keepalive goes out.
+async fn past_the_first_interval() {
+    // The socket's task starts (and notes when it opened) first.
+    settle().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(56)).await;
+    settle().await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_check_nobody_answers_closes_the_socket() {
     let ws = connect(false).await;
-    // Connected; from here tokio's clock skips ahead when nothing runs.
-    tokio::time::pause();
+    past_the_first_interval().await;
     let started = Instant::now();
     ws.check();
     while !ws.is_closed() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    // At the check's 30 seconds, before the keepalive interval's 55 would
-    // notice (the first keepalive went out at the start, unanswered).
+    // At the check's 30 seconds, before the next keepalive interval (at
+    // 110 seconds, 54 from here) would notice the unanswered keepalive.
     let waited = started.elapsed();
-    assert!(waited >= Duration::from_secs(30) && waited < Duration::from_secs(55), "{waited:?}");
+    assert!(waited >= Duration::from_secs(30) && waited < Duration::from_secs(54), "{waited:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn an_answered_check_keeps_the_socket() {
     let ws = connect(true).await;
+    past_the_first_interval().await;
+    // Answers come over a real socket, in real time.
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(300)).await;
     ws.check();
-    // The answer comes over a real socket, in real time.
     tokio::time::sleep(Duration::from_millis(300)).await;
     tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(40)).await;
+    settle().await;
+    assert!(!ws.is_closed());
+}
+
+/// A socket younger than one keepalive interval isn't checked: a keepalive
+/// that early gets it closed by Signal's server, and it can't be stale.
+#[tokio::test(flavor = "current_thread")]
+async fn a_check_on_a_new_socket_sends_nothing() {
+    let ws = connect(false).await;
+    settle().await;
+    tokio::time::pause();
+    ws.check();
+    settle().await;
+    // A check would have closed it at 30 seconds, nobody answering.
     tokio::time::advance(Duration::from_secs(40)).await;
     settle().await;
     assert!(!ws.is_closed());

@@ -134,9 +134,8 @@ impl PushService {
         })
     }
 
-    /// `upload_length` is the size of the encrypted attachment, which the
-    /// server requires (Desktop's `getAttachmentUploadForm({ uploadSize })` in
-    /// `ts/util/uploadAttachment.preload.ts` passes `ciphertextSize`).
+    /// `upload_length` is the size of the encrypted upload; the server rejects 0
+    /// and caps uploads with the returned form at that size.
     pub(crate) async fn get_attachment_v4_upload_attributes(
         &mut self,
         upload_length: u64,

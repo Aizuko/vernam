@@ -8,11 +8,27 @@ changes are listed below, and `git log -- vendor/<crate>` dates each one.
 
 ## presage
 
-whisperfish/presage at `32ffc659fce2f0be7fb01cffdf8c3ebc0c757d80`, the
+whisperfish/presage at `4b81740610c301cbd54d95f4dbd4cadd692af95e`, the
 `presage` crate only (its dev-dependencies removed, as they point into the
 upstream workspace). Modified by Ken Powers for signal-gpui since
-2026-10-15. Changes:
+2026-10-15; the changes were replayed onto this revision on 2026-11-05.
+Changes:
 
+- `src/model/previews.rs` (removed), `src/manager/registered.rs`,
+  `src/errors.rs`, `Cargo.toml`: no link previews. Upstream's sends fill
+  one in for any message with a link and none (`fetch_link_previews`); the
+  app builds previews itself, only when its setting allows and the user
+  didn't dismiss one, fetching only public addresses. The removed code's
+  dependencies also turned on reqwest's `system-proxy` (every HTTP client
+  then followed the macOS proxy settings) and `rustls` (aws-lc-rs) for the
+  whole build.
+- `src/manager/linking.rs`, `src/manager/registered.rs`: no group sync
+  from Storage Service (`sync_groups_from_storage_service` removed).
+  Upstream fetches every group it doesn't know from the group server at
+  link time and, on a storage `FetchLatest`, inside the receive loop. The
+  app's Storage Service sync makes those chats and fetches the groups a
+  bounded number at a time. The store keeps upstream's `left_groups`
+  methods, which presage-store-sqlite implements.
 - `src/manager/registered.rs`: the receiving websocket sends
   `X-Signal-Receive-Stories: true`, so the server delivers stories (upstream
   hard-codes `false`).
@@ -77,10 +93,15 @@ upstream workspace). Modified by Ken Powers for signal-gpui since
 
 ## libsignal-service
 
-whisperfish/libsignal-service-rs at `fb92b13c82fde40ba4d10696cf79aa4f36ce25f1`
+whisperfish/libsignal-service-rs at `7a7526741dfd9ad4c4894717f22651eb0506fb7e`
 (presage's), without its examples and dev-dependencies. Modified by Ken
-Powers for signal-gpui since 2026-10-15. Changes:
+Powers for signal-gpui since 2026-10-15; the changes were replayed onto
+this revision on 2026-11-05. Changes:
 
+- `src/websocket/mod.rs`: `SignalWebSocket::check` skips a socket younger
+  than one keepalive interval: it can't be stale, and upstream delays the
+  first keepalive because Signal's server closes a socket that sends one
+  before it has registered the device.
 - `src/sender.rs`, `src/websocket/sender.rs`: `MessageSender::send_story`
   sends sealed with the story flag (`PUT /v1/messages/{id}?story=true`),
   without an access key and without falling back to an identified send,
