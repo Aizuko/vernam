@@ -148,7 +148,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-y", views::composer::RecordVoice, Some("Composer")),
     ]);
     // The app's accounts (Cmd-1 to 9 are Desktop's, for chats).
-    cx.bind_keys((1..=9).map(|n| KeyBinding::new(&format!("ctrl-cmd-{n}"), SwitchAccount(n - 1), None)));
+    // KeyBinding::new takes a 'static str.
+    const SWITCH: [&str; 9] =
+        ["ctrl-cmd-1", "ctrl-cmd-2", "ctrl-cmd-3", "ctrl-cmd-4", "ctrl-cmd-5", "ctrl-cmd-6", "ctrl-cmd-7", "ctrl-cmd-8", "ctrl-cmd-9"];
+    cx.bind_keys(SWITCH.into_iter().enumerate().map(|(n, keys)| KeyBinding::new(keys, SwitchAccount(n), None)));
 
     menus::bind_keys(cx);
     shortcuts::bind_keys(cx);

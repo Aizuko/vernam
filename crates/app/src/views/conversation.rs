@@ -6735,7 +6735,7 @@ mod tests {
         scroll_up_and_arrive(&mut cx, chrono::Utc::now().timestamp_millis() + 4);
         let over_list = view.read_with(&cx, |v, _| v.list.viewport_bounds().center());
         for _ in 0..50 {
-            cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            cx.simulate_event(gpui_kit::ScrollEvent {
                 position: over_list,
                 delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-200.))),
                 ..Default::default()
@@ -8178,14 +8178,13 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.targeted), Some(photos[0].id));
         // Open the reaction picker from the reaction bar's "more" button.
         cx.update(|_, cx| view.update(cx, |v, cx| v.toggle_reactions_for_targeted(cx)));
-        // Its buttons rise into place; click once they're there.
+        // Its buttons rise into place; click once they're there. Animations
+        // run on the executor's clock, which the test dispatcher only moves
+        // when told.
         bounds(cx, "more-reactions".into());
-        let settle = std::time::Instant::now();
-        while settle.elapsed() < std::time::Duration::from_millis(REACTION_APPEAR_MS + REACTION_STAGGER_MS * 10 + 100) {
-            cx.update(|window, _| window.refresh());
-            cx.run_until_parked();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        cx.executor().advance_clock(std::time::Duration::from_millis(REACTION_APPEAR_MS + REACTION_STAGGER_MS * 10 + 100));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
         let more = bounds(cx, "more-reactions".into());
         cx.simulate_click(more.center(), gpui_kit::Modifiers::none());
         cx.run_until_parked();

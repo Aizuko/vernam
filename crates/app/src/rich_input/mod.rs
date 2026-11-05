@@ -32,7 +32,7 @@ use gpui_kit::component::native_menu::NativeMenu;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
+    Focusable, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent,
     SharedString, Subscription, Task, TestSupportExt as _, UTF16Selection, Window, div, point, px,
 };
 use signal_store::{StyleSpan, TextStyle};
@@ -916,7 +916,7 @@ impl RichInput {
         });
     }
 
-    fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(laid) = &self.laid else { return };
         let max = (laid.height() - self.viewport.size.height).max(px(0.));
         if max <= px(0.) {
@@ -1093,7 +1093,7 @@ impl Render for RichInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .child(element::RichTextElement::new(cx.entity()))
     }
 }

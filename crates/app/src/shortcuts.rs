@@ -133,8 +133,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-v", ToggleCallVideo, Some(CALL_SCREEN)),
         KeyBinding::new("shift-h", ToggleRaiseHand, Some(CALL_SCREEN)),
     ];
-    for n in 1..=9 {
-        bindings.push(KeyBinding::new(&format!("cmd-{n}"), JumpToChat(n - 1), MAIN));
+    // KeyBinding::new takes a 'static str.
+    const JUMP: [&str; 9] = ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"];
+    for (n, keys) in JUMP.into_iter().enumerate() {
+        bindings.push(KeyBinding::new(keys, JumpToChat(n), MAIN));
     }
     cx.bind_keys(bindings);
 }

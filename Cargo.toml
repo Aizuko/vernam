@@ -15,7 +15,7 @@ signal-emoji = { path = "crates/emoji" }
 signal-store = { path = "crates/store" }
 signal-backend = { path = "crates/backend" }
 
-gpui-kit = "0.7.3"
+gpui-kit = "0.9.0"
 
 presage = { git = "https://github.com/whisperfish/presage", rev = "32ffc659fce2f0be7fb01cffdf8c3ebc0c757d80", features = ["cdsi"] }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "32ffc659fce2f0be7fb01cffdf8c3ebc0c757d80" }

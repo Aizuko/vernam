@@ -1,8 +1,9 @@
 //! Message text wrapped where Unicode's line breaking rules (UAX #14)
-//! allow, as Signal Desktop's browser wraps it. GPUI's own wrapper breaks
-//! before any `?` (its `LineWrapper::is_word_char` leaves `?` out so URLs
-//! can wrap), which left a lone `?` at the start of a row. UAX #14 never
-//! breaks before closing punctuation, and breaks after `/` and `?` in URLs.
+//! allow, as Signal Desktop's browser wraps it. GPUI's own wrapper broke
+//! before any `?` (its `LineWrapper::is_word_char` left `?` out so URLs
+//! could wrap), which left a lone `?` at the start of a row; gpui-pre
+//! 0.3.11 wraps with UAX #14 too. UAX #14 never breaks before closing
+//! punctuation, and breaks after `/` and `?` in URLs.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -448,19 +449,19 @@ mod tests {
     }
 
     /// On macOS's text system, at many widths: no row starts with `?`
-    /// (GPUI's own wrapping does at some of them), and every row fits.
+    /// (GPUI's own wrapping did at some of them until gpui-pre 0.3.11), and
+    /// every row fits.
     #[cfg(target_os = "macos")]
     #[test]
     fn question_marks_stay_on_their_row_as_laid_out_on_macos() {
         const TEXT: &str = "Can you explain how this works? What does this go toward? Is it paid direct to the venue? How does that help us later? Who decides? Why not?";
-        let mut gpui_orphans = 0;
         for width in (90..400).step_by(3) {
             let mut cx = gpui_kit::TestAppContext::build_with_text_system(
                 gpui_kit::TestDispatcher::new(0),
                 None,
                 std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
             );
-            let (mut vcx, laid, _) = mount(&mut cx, TEXT, width as f32);
+            let (_vcx, laid, _) = mount(&mut cx, TEXT, width as f32);
             let laid = laid.borrow();
             let laid = laid.as_ref().unwrap();
             for (row, (_, line)) in row_texts(TEXT, laid).iter().zip(&laid.rows) {
@@ -468,16 +469,7 @@ mod tests {
                 let visible = row.trim_end().len();
                 assert!(line.x_for_index(visible) <= px(width as f32), "at {width}px {row:?} overflows");
             }
-            gpui_orphans += vcx.update(|window, _| {
-                let mut wrapper = window.text_system().line_wrapper(gpui_kit::font(".SystemUIFont"), px(14.5));
-                let fragments = [gpui_kit::LineFragment::text(TEXT)];
-                wrapper
-                    .wrap_line(&fragments, px(width as f32), Default::default())
-                    .filter(|boundary| TEXT[boundary.ix..].starts_with('?'))
-                    .count()
-            });
         }
-        assert!(gpui_orphans > 0, "GPUI's wrapper no longer orphans ?, so this test proves nothing");
     }
 
     #[gpui_kit::test]
