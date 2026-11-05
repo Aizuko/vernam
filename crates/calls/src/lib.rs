@@ -381,6 +381,10 @@ pub struct Calls {
     factory: PeerConnectionFactory,
     /// The chosen camera's name (`None`: the first).
     camera_choice: Option<String>,
+    /// The chosen microphone's and speaker's ids (`None`: the system's
+    /// default), resolved as each call starts ([`Calls::use_devices`]).
+    microphone_choice: Option<String>,
+    speaker_choice: Option<String>,
     audio: AudioTrack,
     /// Our microphone is on (as we last told them).
     audio_on: bool,
@@ -397,8 +401,8 @@ pub struct Calls {
 }
 
 impl Calls {
-    /// Opens the default microphone and speakers (through RingRTC's audio
-    /// device module) and sets up the call manager. `emit` is called from
+    /// Starts RingRTC's audio device module (devices are chosen as each
+    /// call starts, [`Calls::use_devices`]) and sets up the call manager. `emit` is called from
     /// RingRTC's threads.
     pub fn new(
         emit: impl Fn(CallEvent) + Send + Sync + 'static,
@@ -412,9 +416,17 @@ impl Calls {
         let mut factory = PeerConnectionFactory::new(&pcf::AudioConfig::default(), false, "", None)
             .map_err(|e| anyhow!("{e}"))
             .context("starting WebRTC")?;
-        // The system's default devices (index 0 is the default).
-        let _ = factory.set_audio_playout_device(0);
-        let _ = factory.set_audio_recording_device(0);
+        // RingRTC 2.73's audio device module lists the devices on its own
+        // thread after starting; wait for that (briefly: a Mac with no
+        // microphone or speaker never fills its list), so Settings and the
+        // first call see them.
+        for _ in 0..20 {
+            let listed = |list: ringrtc::common::Result<pcf::AudioDeviceList>| list.is_ok_and(|l| !l.list.is_empty());
+            if listed(factory.get_audio_recording_devices()) && listed(factory.get_audio_playout_devices()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let audio = factory.create_outgoing_audio_track().map_err(|e| anyhow!("{e}"))?;
         let source = factory.create_outgoing_video_source().map_err(|e| anyhow!("{e}"))?;
         let video = factory.create_outgoing_video_track(&source).map_err(|e| anyhow!("{e}"))?;
@@ -434,6 +446,8 @@ impl Calls {
             manager,
             factory,
             camera_choice: None,
+            microphone_choice: None,
+            speaker_choice: None,
             audio,
             video,
             source,
@@ -469,6 +483,7 @@ impl Calls {
             self.video.clone(),
             Box::new(RemoteSink(self.remote.clone())),
         );
+        self.use_devices(true, true);
         self.manager.proceed(call_id, context, CallConfig::default(), None);
     }
 
@@ -544,8 +559,9 @@ impl Calls {
 
     /// The microphones, speakers and cameras there are.
     pub fn devices(&mut self) -> Devices {
-        let audio = |devices: ringrtc::common::Result<Vec<ringrtc::webrtc::peer_connection_factory::AudioDevice>>| {
+        let audio = |devices: ringrtc::common::Result<ringrtc::webrtc::peer_connection_factory::AudioDeviceList>| {
             devices
+                .map(|devices| devices.list)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|d| Device { id: d.unique_id, name: d.name })
@@ -558,12 +574,61 @@ impl Calls {
         }
     }
 
-    pub fn set_microphone(&mut self, id: &str) -> anyhow::Result<()> {
-        self.factory.set_audio_recording_device_by_id(id).map_err(|e| anyhow!("{e}"))
+    /// Chooses the microphone and speaker (by id; `None`: the system's
+    /// default for calls) for this and later calls, telling RingRTC only if
+    /// a choice changed: it restarts a running stream for every device it's
+    /// given. Returns the kinds ("microphone", "speaker") chosen but not
+    /// connected now; those are used once they are.
+    pub fn set_audio_devices(&mut self, microphone: Option<String>, speaker: Option<String>) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        let connected = |list: ringrtc::common::Result<pcf::AudioDeviceList>, id: &Option<String>| {
+            id.as_ref().is_none_or(|id| list.is_ok_and(|l| l.list.iter().any(|d| &d.unique_id == id)))
+        };
+        if !connected(self.factory.get_audio_recording_devices(), &microphone) {
+            missing.push("microphone");
+        }
+        if !connected(self.factory.get_audio_playout_devices(), &speaker) {
+            missing.push("speaker");
+        }
+        let microphone_changed = microphone != self.microphone_choice;
+        let speaker_changed = speaker != self.speaker_choice;
+        self.microphone_choice = microphone;
+        self.speaker_choice = speaker;
+        self.use_devices(microphone_changed, speaker_changed);
+        missing
     }
 
-    pub fn set_speaker(&mut self, id: &str) -> anyhow::Result<()> {
-        self.factory.set_audio_playout_device_by_id(id).map_err(|e| anyhow!("{e}"))
+    /// Points RingRTC at the chosen microphone and/or speaker if they're
+    /// connected, else the system's default for calls, else the first one.
+    /// Since RingRTC 2.73 its audio device module opens nothing until a
+    /// device is chosen, and fills its device lists in the background after
+    /// starting, so this runs as each call starts (and on a new choice):
+    /// the lists are filled by then, and a default that changed since (a
+    /// headset plugged in) is picked up, as Desktop's calling.ts chooses
+    /// again when devices change. The request id only settles a promise
+    /// through an observer, and there's none.
+    fn use_devices(&mut self, microphone: bool, speaker: bool) {
+        fn pick(list: ringrtc::common::Result<pcf::AudioDeviceList>, choice: Option<&str>) -> Option<String> {
+            let list = list.ok()?;
+            let chosen = choice.and_then(|id| list.list.iter().find(|d| d.unique_id == id));
+            chosen.cloned().or_else(|| list.default.default_for_voip()).or_else(|| list.list.first().cloned()).map(|d| d.unique_id)
+        }
+        if microphone {
+            match pick(self.factory.get_audio_recording_devices(), self.microphone_choice.as_deref()) {
+                Some(id) => {
+                    let _ = self.factory.set_audio_recording_device_by_id(&id, 0);
+                }
+                None => tracing::warn!("no microphone to use"),
+            }
+        }
+        if speaker {
+            match pick(self.factory.get_audio_playout_devices(), self.speaker_choice.as_deref()) {
+                Some(id) => {
+                    let _ = self.factory.set_audio_playout_device_by_id(&id, 0);
+                }
+                None => tracing::warn!("no speaker to use"),
+            }
+        }
     }
 
     /// Chooses the camera (by name); a running one switches over.
@@ -595,6 +660,7 @@ impl Calls {
     }
 
     pub fn group_connect(&mut self, client_id: ClientId) {
+        self.use_devices(true, true);
         self.manager.connect(client_id);
     }
 

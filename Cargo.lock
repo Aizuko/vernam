@@ -6449,8 +6449,8 @@ dependencies = [
 
 [[package]]
 name = "mrp"
-version = "2.72.1"
-source = "git+https://github.com/signalapp/ringrtc?tag=v2.72.1#331d601894f931337d24e9d56c68b94d28fc4555"
+version = "2.74.0"
+source = "git+https://github.com/signalapp/ringrtc?tag=v2.74.0#bdbb0dd1b9f418850dfe1fa3cd4b1c2b1123436f"
 dependencies = [
  "anyhow",
  "log",
@@ -8203,8 +8203,8 @@ dependencies = [
 
 [[package]]
 name = "protobuf"
-version = "2.72.1"
-source = "git+https://github.com/signalapp/ringrtc?tag=v2.72.1#331d601894f931337d24e9d56c68b94d28fc4555"
+version = "2.74.0"
+source = "git+https://github.com/signalapp/ringrtc?tag=v2.74.0#bdbb0dd1b9f418850dfe1fa3cd4b1c2b1123436f"
 dependencies = [
  "prost-build",
  "tonic-prost-build",
@@ -8719,7 +8719,7 @@ dependencies = [
 [[package]]
 name = "regex-aot"
 version = "0.1.0"
-source = "git+https://github.com/signalapp/ringrtc?tag=v2.72.1#331d601894f931337d24e9d56c68b94d28fc4555"
+source = "git+https://github.com/signalapp/ringrtc?tag=v2.74.0#bdbb0dd1b9f418850dfe1fa3cd4b1c2b1123436f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8887,8 +8887,8 @@ dependencies = [
 
 [[package]]
 name = "ringrtc"
-version = "2.72.1"
-source = "git+https://github.com/signalapp/ringrtc?tag=v2.72.1#331d601894f931337d24e9d56c68b94d28fc4555"
+version = "2.74.0"
+source = "git+https://github.com/signalapp/ringrtc?tag=v2.74.0#bdbb0dd1b9f418850dfe1fa3cd4b1c2b1123436f"
 dependencies = [
  "aes 0.9.4",
  "aes-gcm-siv 0.11.1",
@@ -8909,7 +8909,7 @@ dependencies = [
  "mrp",
  "num_enum",
  "prost",
- "protobuf 2.72.1",
+ "protobuf 2.74.0",
  "rand 0.10.3",
  "regex-aot",
  "regex-automata",

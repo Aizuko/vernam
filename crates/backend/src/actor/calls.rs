@@ -58,15 +58,8 @@ impl ActiveCall {
 
 /// Uses the chosen devices (where they're still there).
 fn apply_choices(calls: &mut signal_calls::Calls, choices: &crate::CallDevices) {
-    if let Some(id) = &choices.microphone
-        && let Err(error) = calls.set_microphone(id)
-    {
-        warn!(error = %format!("{error:#}"), "chosen microphone unavailable");
-    }
-    if let Some(id) = &choices.speaker
-        && let Err(error) = calls.set_speaker(id)
-    {
-        warn!(error = %format!("{error:#}"), "chosen speaker unavailable");
+    for kind in calls.set_audio_devices(choices.microphone.clone(), choices.speaker.clone()) {
+        warn!(kind, "chosen device unavailable; using the system's default");
     }
     calls.set_camera(choices.camera.clone());
 }
@@ -83,7 +76,7 @@ pub(super) fn outcome(incoming: bool, connected: bool, reason: Option<EndReason>
 }
 
 impl Actor {
-    /// RingRTC, set up on first use (it opens the audio devices).
+    /// RingRTC, set up on first use (devices open as a call starts).
     pub(super) fn call_session(&self) -> bool {
         if self.calls.borrow().is_some() {
             return true;
