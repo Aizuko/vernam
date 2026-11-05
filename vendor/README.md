@@ -98,6 +98,25 @@ whisperfish/libsignal-service-rs at `7a7526741dfd9ad4c4894717f22651eb0506fb7e`
 Powers for signal-gpui since 2026-10-15; the changes were replayed onto
 this revision on 2026-11-05. Changes:
 
+- `Cargo.toml`, `src/cipher.rs`: libsignal v0.106.1 rather than upstream's
+  v0.99.0, as Signal Desktop 8.36 uses v0.106.0. `message_decrypt_prekey`
+  now returns a `PreKeyDecryptResult`, whose `plaintext` is taken.
+- `src/cipher.rs`: an unsealed message's padding is stripped by the
+  message's own version, not the active session's. libsignal 0.106
+  (Tahini) can decrypt on an archived session without making it active, or
+  archive the active one while decrypting; asking the session then failed
+  and dropped a message that had decrypted.
+- `src/sender.rs`: `create_encrypted_message` fetches a prekey bundle when
+  the record has no usable active session, not only when there's no record.
+  Upstream then failed with `SessionNotFound` and deleted the whole record,
+  archived sessions included, which libsignal keeps for messages already on
+  their way (after a session reset, or Tahini archiving the active one).
+  Of the bundles device 1's fetch returns for all of a contact's devices,
+  those for devices with a usable session are skipped, so their working
+  sessions are kept (the server has claimed their one-time prekeys
+  regardless, as upstream's fetch always did). A linked device whose keys are gone
+  (404) has its record deleted and is left out of the send, rather than
+  failing it and every later one.
 - `src/websocket/mod.rs`: `SignalWebSocket::check` skips a socket younger
   than one keepalive interval: it can't be stale, and upstream delays the
   first keepalive because Signal's server closes a socket that sends one

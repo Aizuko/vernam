@@ -8,7 +8,8 @@ use libsignal_core::{curve::CurveError, InvalidDeviceId};
 use libsignal_protocol::{
     process_prekey_bundle, Aci, ContentHint, DeviceId, IdentityKey,
     IdentityKeyPair, Pni, ProtocolStore, SenderCertificate, SenderKeyStore,
-    ServiceId, SessionNotFound, SignalProtocolError,
+    ServiceId, SessionNotFound, SessionUsabilityRequirements,
+    SignalProtocolError,
 };
 use rand::{rng, CryptoRng, Rng};
 use tracing::{debug, error, info, trace, warn};
@@ -1265,6 +1266,23 @@ where
                         messages.push(message);
                         break;
                     },
+                    // signal-gpui: a linked device's keys are gone (404):
+                    // it was unlinked. Its record (one with no usable
+                    // session, or there'd have been no fetch) is deleted
+                    // and it's left out, rather than failing this send and
+                    // every later one to the contact.
+                    Err(MessageSenderError::NotFound { .. })
+                        if device_id != *DEFAULT_DEVICE_ID =>
+                    {
+                        let address = recipient.to_protocol_address(device_id);
+                        tracing::warn!(%address, "linked device has no keys; dropping its session");
+                        if let Err(error) =
+                            self.protocol_store.delete_session(&address).await
+                        {
+                            tracing::warn!(%error, %address, "failed to delete session");
+                        }
+                        break;
+                    },
                     Err(MessageSenderError::ServiceError(
                         ServiceError::SignalProtocolError(
                             SignalProtocolError::SessionNotFound(
@@ -1341,12 +1359,27 @@ where
 
         // establish a session with the recipient/device if necessary
         // no need to establish a session with ourselves (and our own current device)
-        if self
+        //
+        // signal-gpui: also when the record has no usable active session
+        // (only archived ones, after a session reset or libsignal 0.106's
+        // Tahini archiving the active one), as `ServiceCipher::encrypt`
+        // would refuse it. Processing a bundle archives into the record,
+        // keeping the old sessions for messages already on their way;
+        // otherwise the SessionNotFound below deleted the whole record.
+        let usable = match self
             .protocol_store
             .load_session(&recipient_protocol_address)
             .await?
-            .is_none()
         {
+            Some(record) => record
+                .has_usable_sender_chain(
+                    SystemTime::now(),
+                    SessionUsabilityRequirements::NotStale,
+                )
+                .unwrap_or(false),
+            None => false,
+        };
+        if !usable {
             info!(
                 "establishing new session with {}",
                 recipient_protocol_address
@@ -1384,6 +1417,26 @@ where
                     pre_key_bundle.device_id()?,
                 )
                 .await?;
+
+                // signal-gpui: device 1's fetch returns every device's
+                // bundle; another device with a working session keeps it
+                // (as Desktop fetches keys only for devices that need them).
+                if pre_key_bundle.device_id()? != device_id
+                    && self
+                        .protocol_store
+                        .load_session(&pre_key_address)
+                        .await?
+                        .is_some_and(|record| {
+                            record
+                                .has_usable_sender_chain(
+                                    SystemTime::now(),
+                                    SessionUsabilityRequirements::NotStale,
+                                )
+                                .unwrap_or(false)
+                        })
+                {
+                    continue;
+                }
 
                 process_prekey_bundle(
                     &pre_key_address,

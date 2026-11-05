@@ -422,8 +422,9 @@ where
                 )
                 .await?;
 
+                let message = PreKeySignalMessage::try_from(&ciphertext[..])?;
                 let mut data = message_decrypt_prekey(
-                    &PreKeySignalMessage::try_from(&ciphertext[..])?,
+                    &message,
                     &sender,
                     &self.local_address,
                     &mut self.protocol_store.clone(),
@@ -434,21 +435,15 @@ where
                     csprng,
                 )
                 .await?
-                .as_slice()
-                .to_vec();
+                .plaintext;
 
-                let session_record = self
-                    .protocol_store
-                    .load_session(&sender)
-                    .await?
-                    .ok_or_else(|| {
-                        SignalProtocolError::SessionNotFound(
-                            SessionNotFound::new(sender, "decrypt"),
-                        )
-                    })?;
-
+                // signal-gpui: the message's own version, not the active
+                // session's. libsignal 0.106 (Tahini) can decrypt on an
+                // archived session without making it active, or archive the
+                // active one while decrypting, which left no session to
+                // ask and dropped a message that had decrypted.
                 strip_padding_version(
-                    session_record.session_version()?,
+                    u32::from(message.message_version()),
                     &mut data,
                 )?;
                 DecryptedPayload {
@@ -490,8 +485,9 @@ where
                 )
                 .await?;
 
+                let message = SignalMessage::try_from(&ciphertext[..])?;
                 let mut data = message_decrypt_signal(
-                    &SignalMessage::try_from(&ciphertext[..])?,
+                    &message,
                     &sender,
                     &self.local_address,
                     &mut self.protocol_store.clone(),
@@ -502,18 +498,13 @@ where
                 .as_slice()
                 .to_vec();
 
-                let session_record = self
-                    .protocol_store
-                    .load_session(&sender)
-                    .await?
-                    .ok_or_else(|| {
-                        SignalProtocolError::SessionNotFound(
-                            SessionNotFound::new(sender, "decrypt"),
-                        )
-                    })?;
-
+                // signal-gpui: the message's own version, not the active
+                // session's. libsignal 0.106 (Tahini) can decrypt on an
+                // archived session without making it active, or archive the
+                // active one while decrypting, which left no session to
+                // ask and dropped a message that had decrypted.
                 strip_padding_version(
-                    session_record.session_version()?,
+                    u32::from(message.message_version()),
                     &mut data,
                 )?;
                 DecryptedPayload {
@@ -949,6 +940,7 @@ async fn sealed_sender_decrypt_with_validated_usmc(
                 &mut rng,
             )
             .await?
+            .plaintext
         },
         CiphertextMessageType::SenderKey => {
             group_decrypt(usmc.contents()?, sender_key_store, remote_address)

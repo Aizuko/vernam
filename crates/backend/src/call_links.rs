@@ -25,18 +25,17 @@ use rand::Rng as _;
 
 use crate::actor::SignalManager;
 
-/// Signal's production `genericServerPublicParams` as Desktop had them
-/// before libsignal 0.101 (`config/production.json` in Desktop 7.60).
-/// Desktop 8.34 has newer ones (version byte 1) that only libsignal 0.101
-/// and later read, with credentials asked for with `v101=true`; our
-/// zkgroup is 0.99, so we use these and ask without it.
-const GENERIC_SERVER_PUBLIC_PARAMS: &str = "AByD873dTilmOSG0TjKrvpeaKEsUmIO8Vx9BeMmftwUs9v7ikPwM8P3OHyT0+X3EUMZrSe9VUp26Wai51Q9I8mdk0hX/yo7CeFGJyzoOqn8e/i4Ygbn5HoAyXJx5eXfIbqpc0bIxzju4H/HOQeOpt6h742qii5u/cbwOhFZCsMIbElZTaeU+BWMBQiZHIGHT5IE0qCordQKZ5iPZom0HeFa8Yq0ShuEyAl0WINBiY6xE3H/9WnvzXBbMuuk//eRxXgzO8ieCeK8FwQNxbfXqZm6Ro1cMhCOF3u7xoX83QhpN";
+/// Signal's production `genericServerPublicParams`, as Desktop has them
+/// (`config/production.json` in Desktop 8.36): version 1 params, which
+/// libsignal 0.101 and later read, with credentials asked for with
+/// `v101=true`.
+const GENERIC_SERVER_PUBLIC_PARAMS: &str = "AeCO67P9mIv1yUHkdeZ9JF789GDbox61GvTqq3S4kYc1ADUWxWHQygU390tv1oRWt9WjkdZlU7mKkifF59ftjE+2ZlMmxns6I+ySiLpR8FEmfu+TGpVp3zYTjNV93obJJTyBCCsSHVETCyQRbKdCyb5TMa6LGrvcZaX0Q/VAavhuNA/m4kSiRMgSnYrUjGhVekdDnF+7xioo4wvFnxjIDh7uJQrYOWD6MloNGX7St5gbysTuQQ7i/HI38b9V8x8mKazuDSXxB//BKGZx/XHkK8cHX+QK1MPxYUVM1/CBI5oW";
 
 const DAY_SECONDS: u64 = 24 * 60 * 60;
 
 fn generic_params() -> anyhow::Result<GenericServerPublicParams> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(GENERIC_SERVER_PUBLIC_PARAMS)?;
-    zkgroup::deserialize(&bytes).map_err(|e| anyhow!("{e:?}"))
+    GenericServerPublicParams::try_from(bytes.as_slice()).map_err(|e| anyhow!("{e:?}"))
 }
 
 /// Today's call link credential (serialized), for `day` (unix seconds).
@@ -65,14 +64,14 @@ fn receive_auth_credential(response: &[u8], aci: Aci, day: u64, params: &Generic
 }
 
 /// Fetches today's call link credential, as Desktop's
-/// `maybeFetchNewCredentials` does with `zkcCredential=true` (without
-/// `v101=true`; see [`GENERIC_SERVER_PUBLIC_PARAMS`]).
+/// `maybeFetchNewCredentials` (`getGroupCredentials`) does, with
+/// `v101=true&zkcCredential=true`.
 pub(crate) async fn fetch_auth_credential(manager: &SignalManager) -> anyhow::Result<AuthCredential> {
     let service = crate::storage::push_service(manager)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let today = crate::groups::today(now);
     let path = format!(
-        "/v1/certificate/auth/group?redemptionStartSeconds={today}&redemptionEndSeconds={}&zkcCredential=true",
+        "/v1/certificate/auth/group?redemptionStartSeconds={today}&redemptionEndSeconds={}&v101=true&zkcCredential=true",
         today + 7 * DAY_SECONDS
     );
     let response = service
@@ -126,14 +125,15 @@ fn present_create(
 }
 
 /// A credential to create the link with `root_key` (whose room is
-/// `room_id`), from `POST /v1/call-link/create-auth`.
+/// `room_id`), from `POST /v1/call-link/create-auth?v101=true` (Desktop's
+/// `callLinkCreateAuth`).
 pub(crate) async fn create_auth(manager: &SignalManager, room_id: &[u8], root_key: &[u8]) -> anyhow::Result<CreateAuth> {
     let randomness: [u8; 32] = rand::rng().random();
     let context = CreateCallLinkCredentialRequestContext::new(room_id, randomness);
     let request = base64::engine::general_purpose::STANDARD.encode(zkgroup::serialize(&context.get_request()));
     let service = crate::storage::push_service(manager)?;
     let response = service
-        .request(reqwest::Method::POST, Endpoint::service("/v1/call-link/create-auth"), HttpAuthOverride::NoOverride)?
+        .request(reqwest::Method::POST, Endpoint::service("/v1/call-link/create-auth?v101=true"), HttpAuthOverride::NoOverride)?
         .json(&serde_json::json!({ "createCallLinkCredentialRequest": request }))
         .send()
         .await?
@@ -155,15 +155,20 @@ pub(crate) fn endorsement_key(manager: &SignalManager) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use presage::libsignal_service::zkgroup::generic_server_params::GenericServerSecretParams;
+    use presage::libsignal_service::zkgroup::generic_server_params::{
+        GenericServerSecretParams, GenericServerSecretParamsStandard,
+    };
 
     fn aci() -> Aci {
         Aci::from_uuid_bytes([7; 16])
     }
 
+    /// Signal's params parse as version 1 ("standard"), which credentials
+    /// asked for with `v101=true` are issued under; the older version 0
+    /// ones would parse too but not verify them.
     #[test]
-    fn signals_params_parse() {
-        assert!(generic_params().is_ok());
+    fn signals_params_parse_as_version_1() {
+        assert!(matches!(generic_params(), Ok(GenericServerPublicParams::V1(_))));
     }
 
     #[test]
@@ -183,7 +188,8 @@ mod tests {
     /// what the calling server accepts.
     #[test]
     fn credentials_present_as_the_server_checks_them() {
-        let server = GenericServerSecretParams::generate([1; 32]);
+        // Version 1 ("standard") params, as Signal's production ones are.
+        let server = GenericServerSecretParams::V1(GenericServerSecretParamsStandard::generate([1; 32]));
         let public = server.get_public_params();
         let day = 1_700_006_400 - 1_700_006_400 % DAY_SECONDS;
         let root_key = [9u8; 16];

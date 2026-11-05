@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use backup_account_keys::BackupKey;
+use libsignal_account_keys::BackupKey;
 use libsignal_core::Aci;
 use libsignal_core::curve::PrivateKey;
 use presage::libsignal_service::configuration::{Endpoint, SignalServers};
@@ -93,7 +93,7 @@ pub(crate) fn thumbnail_media_name(name: &str) -> String {
 
 /// A media id: what the backup tier calls a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MediaId(pub [u8; backup_account_keys::MEDIA_ID_LEN]);
+pub(crate) struct MediaId(pub [u8; libsignal_account_keys::MEDIA_ID_LEN]);
 
 impl MediaId {
     /// Desktop's `getMediaIdFromMediaName`.

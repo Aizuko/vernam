@@ -652,7 +652,7 @@ pub(crate) async fn import(db: &AppDb, plain: &[u8], me: &str, mut progress: imp
                     db.edit_chat_folders(signal_store::ChatFolderEdit::Merge(folder)).await?;
                 }
             }
-            Some(proto::frame::Item::StickerPack(pack)) => {
+            Some(proto::frame::Item::InstalledStickerPack(pack)) => {
                 imported.sticker_packs.push((pack.packId.clone(), pack.packKey.clone()));
             }
             Some(proto::frame::Item::ChatItem(item)) => {
@@ -1510,7 +1510,7 @@ mod tests {
         let mut pack = proto::StickerPack::new();
         pack.packId = vec![0xab; 16];
         pack.packKey = vec![0xcd; 32];
-        push(proto::Frame { item: Some(proto::frame::Item::StickerPack(pack)), ..Default::default() });
+        push(proto::Frame { item: Some(proto::frame::Item::InstalledStickerPack(pack)), ..Default::default() });
         // Our reply to Alice, quoting her, with her reaction and a photo
         // still on the transit tier.
         let mut standard = proto::StandardMessage::new();
