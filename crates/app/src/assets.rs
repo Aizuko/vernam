@@ -24,6 +24,7 @@ gpui_kit::assets::icon_assets!(
         ChartBar,
         CheckCheck,
         CircleAlert,
+        CircleDashed,
         Clock,
         Download,
         Ellipsis,
@@ -31,6 +32,7 @@ gpui_kit::assets::icon_assets!(
         FaceSlightlySmiling,
         FaceSlightlySmilingPlus,
         File,
+        FolderDown,
         Forward,
         Info,
         LoaderCircle,
@@ -128,5 +130,47 @@ impl AssetSource for Assets {
         paths.sort();
         paths.dedup();
         Ok(paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::assets::IconName;
+
+    /// Every `IconName::X` in the app's code (comments aside) loads. GPUI
+    /// Kit's default set holds only its own components' icons, so one
+    /// missing from `ExtraIcons` draws nothing and logs "could not find
+    /// asset". Signal's own icons, whose paths are built at run time, aren't
+    /// checked here.
+    #[test]
+    fn every_icon_name_the_app_uses_is_embedded() {
+        let mut source = String::new();
+        let mut dirs = vec![std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for line in text.lines().filter(|line| !line.trim_start().starts_with("//")) {
+                        source.push_str(line);
+                        source.push('\n');
+                    }
+                }
+            }
+        }
+        let named = |name: &str| {
+            source.match_indices(&format!("IconName::{name}")).any(|(at, found)| {
+                !source[at + found.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            })
+        };
+        let missing: Vec<String> = IconName::ALL
+            .iter()
+            .filter(|icon| named(&format!("{icon:?}")) && !matches!(Assets.load(&icon.path()), Ok(Some(_))))
+            .map(|icon| format!("{icon:?}"))
+            .collect();
+        assert!(missing.is_empty(), "add these to ExtraIcons: {missing:?}");
     }
 }
