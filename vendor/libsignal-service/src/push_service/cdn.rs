@@ -134,12 +134,18 @@ impl PushService {
         })
     }
 
+    /// `upload_length` is the size of the encrypted attachment, which the
+    /// server requires (Desktop's `getAttachmentUploadForm({ uploadSize })` in
+    /// `ts/util/uploadAttachment.preload.ts` passes `ciphertextSize`).
     pub(crate) async fn get_attachment_v4_upload_attributes(
         &mut self,
+        upload_length: u64,
     ) -> Result<AttachmentUploadForm, ServiceError> {
         self.request(
             Method::GET,
-            Endpoint::service("/v4/attachments/form/upload"),
+            Endpoint::service(format!(
+                "/v4/attachments/form/upload?uploadLength={upload_length}"
+            )),
             HttpAuthOverride::NoOverride,
         )?
         .send()
