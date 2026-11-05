@@ -1,9 +1,16 @@
 //! Message text wrapped where Unicode's line breaking rules (UAX #14)
 //! allow, as Signal Desktop's browser wraps it. GPUI's own wrapper broke
 //! before any `?` (its `LineWrapper::is_word_char` left `?` out so URLs
-//! could wrap), which left a lone `?` at the start of a row; gpui-pre
-//! 0.3.11 wraps with UAX #14 too. UAX #14 never breaks before closing
-//! punctuation, and breaks after `/` and `?` in URLs.
+//! could wrap), which left a lone `?` at the start of a row. UAX #14 never
+//! breaks before closing punctuation, and breaks after `/` and `?` in URLs.
+//!
+//! gpui-pre 0.3.11 breaks at UAX #14 opportunities too, but still fits
+//! rows differently: it adds up each character's width rather than
+//! measuring the shaped line, so an emoji joined with ZWJ counts as all of
+//! its parts, and a row's trailing space counts against its width instead
+//! of hanging. Compared on macOS's text system at every width from 90 to
+//! 400px, its rows broke a word earlier than these in 986 of 2,480
+//! layouts of eight sample messages (every width of the emoji one).
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
