@@ -3340,8 +3340,6 @@ mod tests {
         assert_eq!(text(&f, cx), "");
     }
 
-    // Hunspell marks these on Linux; ignored until the Linux spell check lands.
-    #[cfg_attr(target_os = "linux", ignore)]
     #[gpui_kit::test]
     fn misspellings_are_marked_once_typing_pauses_and_replaced_from_the_menu(cx: &mut TestAppContext) {
         let f = mount(cx);
