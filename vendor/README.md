@@ -90,6 +90,10 @@ Changes:
 - `src/manager/registered.rs`: `Manager::check_websockets` checks the
   websockets already open (`SignalWebSocket::check`), for when the machine
   wakes, as Desktop's `checkSockets`. Upstream has no way to.
+- `src/manager/registered.rs`: the receive loop logs a warning when
+  opening an envelope, updating a group, downloading synced contacts or
+  saving a message takes a quarter second or more (`log_if_slow`), to find
+  what holds up catching up on the server's queue.
 
 ## libsignal-service
 

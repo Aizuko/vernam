@@ -745,6 +745,7 @@ impl<S: Store> Manager<S, Registered> {
                 loop {
                     match state.encrypted_messages.next().await {
                         Some(Ok(Incoming::Envelope(envelope))) => {
+                            let opening = std::time::Instant::now();
                             let envelope = {
                                 // the permit is released at the end of the block (impl Drop)
                                 match envelope.parse_destination_service_id() {
@@ -772,6 +773,7 @@ impl<S: Store> Manager<S, Registered> {
                                     }
                                 }
                             };
+                            log_if_slow("opening an envelope", opening);
                             match envelope {
                                 Ok(Some(content)) => {
                                     if let ContentBody::DecryptionErrorMessage(e) = &content.body {
@@ -888,11 +890,13 @@ impl<S: Store> Manager<S, Registered> {
                                         ..
                                     }) = &content.body
                                     {
-                                        match state
+                                        let started = std::time::Instant::now();
+                                        let retrieved = state
                                             .message_receiver
                                             .retrieve_contacts(contacts)
-                                            .await
-                                        {
+                                            .await;
+                                        log_if_slow("downloading synced contacts", started);
+                                        match retrieved {
                                             Ok(contacts) => {
                                                 info!("saving contacts");
                                                 for contact in contacts.filter_map(Result::ok) {
@@ -1039,18 +1043,21 @@ impl<S: Store> Manager<S, Registered> {
                                         // there's two things to implement: the group metadata (fetched from HTTP API)
                                         // and the group changes, which are part of the protobuf messages
                                         // this means we kinda need our own internal representation of groups inside of presage?
-                                        if let Ok(Some(group)) = upsert_group(
+                                        let started = std::time::Instant::now();
+                                        let upserted = upsert_group(
                                             &state.store,
                                             &mut state.groups_manager,
                                             master_key_bytes,
                                             revision,
                                         )
-                                        .await
-                                        {
+                                        .await;
+                                        log_if_slow("updating a group", started);
+                                        if let Ok(Some(group)) = upserted {
                                             trace!(?group, "upserted group");
                                         }
                                     }
 
+                                    let started = std::time::Instant::now();
                                     if let Err(error) = save_message(
                                         &mut state.store,
                                         &mut state.identified_websocket,
@@ -1061,6 +1068,7 @@ impl<S: Store> Manager<S, Registered> {
                                     {
                                         error!(%error, "error saving message to store");
                                     }
+                                    log_if_slow("saving a message", started);
 
                                     return Some((Received::Content(Box::new(content)), state));
                                 }
@@ -2600,4 +2608,12 @@ async fn register_pre_keys<S: Store>(
 
     trace!("registered pre keys");
     Ok(())
+}
+
+/// signal-gpui: a step of receiving an envelope that held up the stream.
+fn log_if_slow(step: &str, started: std::time::Instant) {
+    let elapsed = started.elapsed();
+    if elapsed >= std::time::Duration::from_millis(250) {
+        warn!(elapsed_ms = elapsed.as_millis(), "slow receive step: {step}");
+    }
 }
