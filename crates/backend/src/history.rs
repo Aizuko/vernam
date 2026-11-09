@@ -1264,6 +1264,7 @@ fn attachment(pointer: &proto::FilePointer) -> AttachmentMeta {
         remote: locator.and_then(remote),
         thumbnail_path: None,
         sticker_pack: None,
+        transcode: false,
     }
 }
 

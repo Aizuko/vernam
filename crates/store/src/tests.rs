@@ -285,6 +285,7 @@ async fn delete_edit_attachments_and_search() {
         remote: None,
         thumbnail_path: None,
         sticker_pack: None,
+        transcode: false,
     }];
     m.quote = Some(Quote { author: None, author_name: "You".into(), sent_at: 0, text: "q".into(), thumbnail: None, attachment: None, story: false });
     let id = db.insert_message(&m).await.unwrap();
@@ -300,6 +301,17 @@ async fn delete_edit_attachments_and_search() {
     let attachment = db.message(id).await.unwrap().unwrap().attachments[0].clone();
     assert_eq!(attachment.local_path.as_deref(), Some("/tmp/a.png"));
     assert_eq!(attachment.thumbnail_path.as_deref(), Some("/tmp/a-thumbnail.webp"));
+    // A video still to be re-encoded keeps that mark until it's been tried.
+    let mut video = incoming("d:v", "v", 3, "");
+    video.attachments = vec![AttachmentMeta { content_type: "video/mp4".into(), transcode: true, ..m.attachments[0].clone() }];
+    let video_id = db.insert_message(&video).await.unwrap();
+    assert!(db.message(video_id).await.unwrap().unwrap().attachments[0].transcode);
+    assert!(db.finish_attachment_transcode(video_id, 0, Some(4)).await.unwrap());
+    let done = db.message(video_id).await.unwrap().unwrap().attachments[0].clone();
+    assert_eq!((done.transcode, done.size), (false, 4));
+    // Failed: the size stays.
+    assert!(db.finish_attachment_transcode(video_id, 0, None).await.unwrap());
+    assert_eq!(db.message(video_id).await.unwrap().unwrap().attachments[0].size, 4);
 
     let hits = db.search_messages("fox", 10).await.unwrap();
     assert_eq!(hits.iter().map(|h| h.message_id).collect::<Vec<_>>(), [id2, id]);
@@ -352,6 +364,7 @@ async fn the_next_audio_is_the_chats_next_message_with_audio() {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         }];
         m
     };
@@ -492,6 +505,7 @@ async fn attachment_only_preview() {
         remote: None,
         thumbnail_path: None,
         sticker_pack: None,
+        transcode: false,
     }];
     db.insert_message(&m).await.unwrap();
     assert_eq!(
@@ -982,6 +996,7 @@ async fn media_messages_are_those_with_attachments_or_previews() {
         remote: None,
         thumbnail_path: None,
         sticker_pack: None,
+        transcode: false,
     }];
     let photo = db.insert_message(&photo).await.unwrap();
     let media: Vec<i64> = db.media_messages(&conv("d:a"), 10).await.unwrap().iter().map(|m| m.id).collect();
@@ -1679,6 +1694,7 @@ async fn attachments_are_named_as_desktop_names_them() {
         remote: None,
         thumbnail_path: None,
         sticker_pack: None,
+        transcode: false,
     };
     let gif = AttachmentMeta { gif: true, ..meta("video/mp4") };
     assert_eq!(attachment_preview(&gif), "🎡 GIF", "a GIF is an MP4 with the GIF flag");
@@ -1733,6 +1749,7 @@ async fn stories_last_a_day_and_keep_views_and_replies() {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         },
         caption: String::new(),
         styles: Vec::new(),
@@ -2102,6 +2119,7 @@ fn photo(path: Option<&str>) -> AttachmentMeta {
         remote: None,
         thumbnail_path: None,
         sticker_pack: None,
+        transcode: false,
     }
 }
 
@@ -2766,6 +2784,7 @@ async fn message_content_previews_and_gift_badge_states() {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         }),
         ..Default::default()
     };

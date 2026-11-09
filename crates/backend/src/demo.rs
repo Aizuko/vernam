@@ -206,6 +206,7 @@ async fn seed(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         })
     };
     let photo = image("demo-photo.png", PHOTO_WIDTH, PHOTO_HEIGHT);
@@ -321,6 +322,7 @@ async fn seed(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         }];
         db.insert_message(&voice).await?;
         // A second one straight after: Desktop plays it when the first ends.
@@ -427,6 +429,7 @@ async fn seed(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         }];
         db.insert_message(&gif).await?;
     }
@@ -818,6 +821,7 @@ async fn seed_stories(db: &AppDb, data_dir: &Path) -> signal_store::Result<()> {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         };
         let content = StoryContent::Media { attachment: photo, caption: "Golden hour".into(), styles: Vec::new() };
         db.insert_story(&story(Some(JORDAN), Some("Jordan Reyes"), 5 * HOUR, None, content), now).await?;
@@ -1277,6 +1281,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                             remote: None,
                             thumbnail_path: None,
                             sticker_pack: None,
+                            transcode: false,
                         })
                     });
                     LinkPreview { url: draft.url, title: Some(draft.title), description: draft.description, date: draft.date, image }
@@ -1375,6 +1380,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                     remote: None,
                     thumbnail_path: None,
                     sticker_pack: None,
+                    transcode: false,
                 });
                 let _ = db.set_content(id, &signal_store::MessageContent::Contact(Box::new(contact))).await;
                 emit(Event::MessageChanged { conversation: conversation.clone(), message_id: id });
@@ -1801,6 +1807,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         remote: None,
                         thumbnail_path: None,
                         sticker_pack: None,
+                        transcode: false,
                     }],
                     link_preview: None,
                     expires_in: 0,
@@ -1914,6 +1921,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                             key: hex::encode(&pack.key),
                             sticker_id: Some(sticker.id),
                         }),
+                        transcode: false,
                     }],
                     link_preview: None,
                     expires_in: 0,
@@ -1977,6 +1985,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         remote: None,
                         thumbnail_path: None,
                         sticker_pack: None,
+                        transcode: false,
                     });
                 }
                 if attachments.is_empty() {
@@ -2041,6 +2050,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         remote: None,
                         thumbnail_path: None,
                         sticker_pack: None,
+                        transcode: false,
                     }],
                     link_preview: None,
                     expires_in: 0,
@@ -2159,6 +2169,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                                     remote: None,
                                     thumbnail_path: None,
                                     sticker_pack: None,
+                                    transcode: false,
                                 },
                                 caption: caption.clone(),
                                 styles: styles.clone(),

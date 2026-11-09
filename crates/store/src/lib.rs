@@ -311,6 +311,10 @@ pub struct AttachmentMeta {
     /// (Desktop keeps `message.sticker.packId` and `packKey`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticker_pack: Option<StickerPackRef>,
+    /// A video still to be re-encoded smaller before it's sent (Desktop's
+    /// `transcodingTargetQuality`), until that's been tried.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transcode: bool,
 }
 
 /// A sticker's pack, by its hex id and key (as `StickerPackRow` has them),
@@ -3040,6 +3044,19 @@ impl AppDb {
     /// never `Ok(false)`, so a second download of it keeps its file.
     pub async fn set_attachment_path(&self, message_id: i64, index: usize, path: &str) -> Result<bool> {
         self.edit_attachment(message_id, index, |att| att.local_path = Some(path.to_owned())).await
+    }
+
+    /// Records that a video was re-encoded before it was sent (with its new
+    /// size) or that that was tried and failed (`None`), so it isn't again;
+    /// `Ok(false)` as for `set_attachment_path`.
+    pub async fn finish_attachment_transcode(&self, message_id: i64, index: usize, size: Option<u64>) -> Result<bool> {
+        self.edit_attachment(message_id, index, |att| {
+            att.transcode = false;
+            if let Some(size) = size {
+                att.size = size;
+            }
+        })
+        .await
     }
 
     /// Records where an attachment's backup thumbnail was saved; `Ok(false)`

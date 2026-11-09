@@ -81,6 +81,17 @@ imagesize = "0.15"
 # Quote thumbnails decode what was quoted (JPEG, WebP and GIF too).
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp", "ico", "jpeg", "webp", "gif"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Re-encoding videos before they're sent (AVAssetReader and AVAssetWriter),
+# as Desktop does from 8.37; the same bindings the app plays videos with.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-media", "AVAsset", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMBase", "CMTime", "CMFormatDescription", "CMSampleBuffer"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFString", "CFCGTypes"] }
+
 [dev-dependencies]
 # libsignal's fixed-seed test rng, to check presentations against its vectors.
 rand_chacha = "0.9"

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use signal_backend::video::VideoInfo;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::{
@@ -122,6 +124,15 @@ impl StagedPreview {
 struct PendingFile {
     bytes: Arc<Vec<u8>>,
     file_name: String,
+}
+
+/// Whether a file was queued, and why not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Added {
+    Yes,
+    TooBig,
+    /// A video longer than can be sent.
+    TooLong,
 }
 
 /// An image waiting to be sent with the next message.
@@ -1305,15 +1316,41 @@ impl Composer {
         true
     }
 
+    /// Queues a video that's re-encoded smaller before it's sent (Desktop's
+    /// `processAttachment` with `handleVideoAttachment`): refused when it's
+    /// longer than can be sent, otherwise judged by about how big it comes
+    /// out rather than its size now.
+    fn add_video(&mut self, bytes: Vec<u8>, file_name: Option<String>, info: &VideoInfo, cx: &mut Context<Self>) -> Added {
+        let phone = self.state.read(cx).account.as_ref().and_then(|a| a.phone.clone());
+        if info.duration_secs > signal_backend::video::max_duration_secs(phone.as_deref()) {
+            return Added::TooLong;
+        }
+        let target = signal_backend::video::target_for(phone.as_deref(), info.duration_secs);
+        let estimate = signal_backend::video::estimated_size(info, &target);
+        let config = self.state.read(cx).remote_config();
+        // One small enough already goes whatever the estimate says.
+        if signal_backend::too_big_to_send(estimate as usize, &config) && signal_backend::too_big_to_send(bytes.len(), &config) {
+            return Added::TooBig;
+        }
+        self.files.push(PendingFile { bytes: Arc::new(bytes), file_name: file_name.unwrap_or_else(|| "video.mp4".into()) });
+        cx.notify();
+        Added::Yes
+    }
+
     /// Reads files off the UI thread and queues them: images to send as
-    /// photos, anything else as a file.
+    /// photos, anything else as a file. An MP4 is read as a video there
+    /// too, for its length and bitrate.
     fn add_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let read = cx.background_spawn(async move {
             paths
                 .into_iter()
                 .map(|path| {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-                    std::fs::read(&path).ok().map(|bytes| (bytes, name))
+                    let video = name
+                        .as_deref()
+                        .filter(|n| signal_backend::video::transcodes(signal_backend::media::content_type_for_file(n)))
+                        .and_then(|_| signal_backend::video::probe(&path));
+                    std::fs::read(&path).ok().map(|bytes| (bytes, name, video))
                 })
                 .collect::<Vec<_>>()
         });
@@ -1321,24 +1358,40 @@ impl Composer {
             let files = read.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let unreadable = files.iter().filter(|f| f.is_none()).count();
-                let too_big = files
-                    .into_iter()
-                    .flatten()
-                    .filter(|(bytes, name)| {
-                        !this.add_image(bytes.clone(), name.clone(), cx) && !this.add_file(bytes.clone(), name.clone(), cx)
-                    })
-                    .count();
+                let (mut too_big, mut too_long) = (0, 0);
+                for (bytes, name, video) in files.into_iter().flatten() {
+                    // A video that can't be read as one is judged as a file.
+                    let added = match video {
+                        Some(info) => this.add_video(bytes, name, &info, cx),
+                        None if this.add_image(bytes.clone(), name.clone(), cx) || this.add_file(bytes, name, cx) => Added::Yes,
+                        None => Added::TooBig,
+                    };
+                    match added {
+                        Added::Yes => {}
+                        Added::TooBig => too_big += 1,
+                        Added::TooLong => too_long += 1,
+                    }
+                }
                 let mut problems = Vec::new();
                 if too_big > 0 {
                     let limit = signal_backend::size_limit_label(this.state.read(cx).remote_config().attachment_max_bytes());
                     problems.push(format!("{too_big} over Signal's {limit} limit"));
+                }
+                if too_long > 0 {
+                    // Desktop's `icu:videoFileTooLongWarning`.
+                    let phone = this.state.read(cx).account.as_ref().and_then(|a| a.phone.clone());
+                    let max = signal_backend::video::duration_label(signal_backend::video::max_duration_secs(phone.as_deref()));
+                    problems.push(format!("{too_long} longer than {max}, too long to send"));
                 }
                 if unreadable > 0 {
                     problems.push(format!("{unreadable} that couldn't be read"));
                 }
                 if !problems.is_empty() {
                     this.state.update(cx, |state, cx| {
-                        state.report_error(format!("Skipped {} file(s): {}", too_big + unreadable, problems.join(", ")), cx);
+                        state.report_error(
+                            format!("Skipped {} file(s): {}", too_big + too_long + unreadable, problems.join(", ")),
+                            cx,
+                        );
                     });
                 }
                 this.focus(window, cx);
@@ -2868,6 +2921,33 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("nothing was sent");
+    }
+
+    /// Desktop lets a video through by how big it comes out once
+    /// re-encoded, and refuses one longer than can be sent.
+    #[gpui_kit::test]
+    fn videos_are_judged_by_their_length_and_the_size_they_come_out(cx: &mut TestAppContext) {
+        let f = mount(cx);
+        let info = |duration_secs: f64, video_bps: f64| VideoInfo {
+            duration_secs,
+            video_bps,
+            audio_bps: 128e3,
+            audio_copied: true,
+            display_width: 1920,
+            display_height: 1080,
+        };
+        f.composer.update(cx, |c, cx| {
+            let limit = c.state.read(cx).remote_config().attachment_max_bytes() as usize;
+            // Bigger than the limit now, 2 minutes at 2 Mbps once re-encoded.
+            assert_eq!(c.add_video(vec![0; limit + 1], Some("trip.mp4".into()), &info(120., 20e6), cx), Added::Yes);
+            // Too long for any step, whatever its size.
+            assert_eq!(c.add_video(vec![0; 10], Some("long.mp4".into()), &info(901., 1e6), cx), Added::TooLong);
+            // Too big even re-encoded: 14 minutes at 1.5 Mbps is about 170 MB.
+            assert_eq!(c.add_video(vec![0; limit + 1], Some("big.mp4".into()), &info(840., 20e6), cx), Added::TooBig);
+            // Unless it's small enough already.
+            assert_eq!(c.add_video(vec![0; 10], Some("small.mp4".into()), &info(840., 20e6), cx), Added::Yes);
+            assert_eq!(c.files.len(), 2);
+        });
     }
 
     #[gpui_kit::test]

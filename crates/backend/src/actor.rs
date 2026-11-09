@@ -156,6 +156,9 @@ struct Upload {
     file_type: Option<String>,
     /// Sent with the voice message flag.
     voice: bool,
+    /// A video to re-encode smaller first (`video::transcodes`), and its
+    /// place among the message's attachments, whose size then changes.
+    transcode: Option<usize>,
 }
 
 /// Outbound work, processed one at a time so sessions are never ratcheted concurrently.
@@ -398,6 +401,22 @@ impl Outbound {
         }
     }
 
+    /// The chat a message, edit or delete goes to, to keep their order
+    /// there; not typing indicators and the like, which Desktop sends apart
+    /// from the chat's queue.
+    fn chat(&self) -> Option<&ConversationId> {
+        match self {
+            Outbound::Send { conversation, message: Some(_), .. }
+            | Outbound::Send { conversation, body: ContentBody::EditMessage(_), .. }
+            | Outbound::Delete { conversation, .. }
+            | Outbound::SendImages { conversation, .. }
+            | Outbound::SendGif { conversation, .. }
+            | Outbound::SendSticker { conversation, .. }
+            | Outbound::SendContact { conversation, .. } => Some(conversation),
+            _ => None,
+        }
+    }
+
     /// The message row whose status this send tracks, with its chat and
     /// timestamp.
     fn tracked(&self) -> Option<(ConversationId, i64, u64)> {
@@ -495,6 +514,14 @@ struct Actor {
     /// (taken once the import starts).
     history: RefCell<Option<tokio::task::JoinHandle<()>>>,
     outbound: mpsc::UnboundedSender<Outbound>,
+    /// Sends whose videos are re-encoded first, one at a time, apart from
+    /// `outbound` so other sends don't wait on them (Desktop encodes in
+    /// the chat's own send queue).
+    videos: mpsc::UnboundedSender<Outbound>,
+    /// Jobs in `videos` by chat: while a chat has any, its later jobs wait
+    /// there too, so they go in the order they were made, as in Desktop's
+    /// per-chat queue (a reply or edit after its video, not before).
+    video_waits: RefCell<HashMap<ConversationId, usize>>,
     linking: RefCell<bool>,
     /// Storage Service contacts have been read this session.
     storage_synced: RefCell<bool>,
@@ -577,6 +604,7 @@ pub(crate) async fn run(
     };
 
     let (outbound, outbound_rx) = mpsc::unbounded();
+    let (videos, videos_rx) = mpsc::unbounded();
     let (call_events, call_events_rx) = mpsc::unbounded();
     let (call_sends, call_sends_rx) = mpsc::unbounded();
     let actor = Rc::new(Actor {
@@ -626,6 +654,8 @@ pub(crate) async fn run(
         trusted_photo_failures: RefCell::default(),
         history: RefCell::new(None),
         outbound,
+        videos,
+        video_waits: Default::default(),
         linking: RefCell::new(false),
         storage_synced: RefCell::new(false),
         account_record_read: Default::default(),
@@ -655,6 +685,7 @@ pub(crate) async fn run(
     });
 
     tokio::task::spawn_local(actor.clone().outbound_loop(outbound_rx));
+    tokio::task::spawn_local(actor.clone().video_loop(videos_rx));
     tokio::task::spawn_local(actor.clone().expiry_loop());
     tokio::task::spawn_local(actor.clone().call_loop(call_events_rx));
     tokio::task::spawn_local(actor.clone().call_send_loop(call_sends_rx));
@@ -2859,6 +2890,7 @@ impl Actor {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         };
         let Some((id, data, timestamp)) = self.store_outgoing(&conversation, String::new(), quote, vec![meta], None).await
         else {
@@ -2938,6 +2970,7 @@ impl Actor {
                 key: hex::encode(&pack.key),
                 sticker_id: Some(sticker.id),
             }),
+            transcode: false,
         };
         let Some((id, mut data, timestamp)) = self.store_outgoing(&conversation, String::new(), quote, vec![meta], None).await
         else {
@@ -3852,7 +3885,8 @@ impl Actor {
         }
         let images: Vec<_> = attachments
             .iter()
-            .filter_map(|a| {
+            .enumerate()
+            .filter_map(|(index, a)| {
                 Some(Upload {
                     path: local(a)?,
                     file_name: a.file_name.clone(),
@@ -3861,6 +3895,9 @@ impl Actor {
                     file_type: (!matches!(a.content_type.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif"))
                         .then(|| a.content_type.clone()),
                     voice: a.voice,
+                    // Until it's been tried (Desktop keeps
+                    // `transcodingTargetQuality` until then).
+                    transcode: a.transcode.then_some(index),
                 })
             })
             .collect();
@@ -3894,8 +3931,15 @@ impl Actor {
         for conversation in &conversations {
             for message_id in &message_ids {
                 let Some(message) = self.db.message(*message_id).await.ok().flatten() else { continue };
-                let attachments: Vec<AttachmentMeta> =
-                    message.attachments.iter().filter(|a| a.local_path.is_some() && !a.sticker).cloned().collect();
+                // A forward goes as the file is: never re-encoded (Desktop
+                // reuses the attachment), whether or not the original's
+                // re-encode has happened yet.
+                let attachments: Vec<AttachmentMeta> = message
+                    .attachments
+                    .iter()
+                    .filter(|a| a.local_path.is_some() && !a.sticker)
+                    .map(|a| AttachmentMeta { transcode: false, ..a.clone() })
+                    .collect();
                 // Desktop doesn't forward polls or view-once messages
                 // (`canForward`).
                 if message.deleted
@@ -4031,6 +4075,7 @@ impl Actor {
                                 remote: None,
                                 thumbnail_path: None,
                                 sticker_pack: None,
+                                transcode: false,
                             })
                         }
                     }
@@ -4149,8 +4194,9 @@ impl Actor {
                 remote: None,
                 thumbnail_path: None,
                 sticker_pack: None,
+                transcode: false,
             });
-            files.push(Upload { path, file_name: image.file_name, file_type: None, voice: false });
+            files.push(Upload { path, file_name: image.file_name, file_type: None, voice: false, transcode: None });
         }
         if files.is_empty() {
             return;
@@ -4199,11 +4245,15 @@ impl Actor {
         styles: Vec<signal_store::StyleSpan>,
         view_once: bool,
     ) {
-        if crate::too_big_to_send(file.bytes.len(), &crate::remote_config()) {
+        let name = media::safe_file_name(&file.file_name);
+        // A video is re-encoded smaller before it's uploaded, and judged by
+        // its size then (Desktop's `preProcessAttachment` lets one through
+        // for that).
+        let transcode = !file.voice && crate::video::transcodes(media::content_type_for_file(&name));
+        if !transcode && crate::too_big_to_send(file.bytes.len(), &crate::remote_config()) {
             let limit = crate::size_limit_label(crate::remote_config().attachment_max_bytes());
             return self.error("can't send file", format!("larger than Signal's {limit} limit"));
         }
-        let name = media::safe_file_name(&file.file_name);
         let dir = self.config.data_dir.join("attachments").join(format!("sent-{}", now_millis()));
         let path = dir.join(&name);
         let written = async {
@@ -4230,6 +4280,7 @@ impl Actor {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode,
         };
         let wire_caption = caption.trim_end().to_owned();
         let wire_styles = mapping::wire_styles(&wire_caption, &styles);
@@ -4245,7 +4296,13 @@ impl Actor {
             body: data,
             timestamp,
             message: id,
-            images: vec![Upload { path, file_name: wire_name, file_type: Some(meta_type), voice: file.voice }],
+            images: vec![Upload {
+                path,
+                file_name: wire_name,
+                file_type: Some(meta_type),
+                voice: file.voice,
+                transcode: transcode.then_some(0),
+            }],
             preview_image: None,
         });
     }
@@ -4736,7 +4793,49 @@ impl Actor {
     }
 
     fn enqueue(&self, job: Outbound) {
-        let _ = self.outbound.unbounded_send(job);
+        let video = matches!(&job, Outbound::SendImages { images, .. } if images.iter().any(|u| u.transcode.is_some()));
+        let waiting = job.chat().is_some_and(|c| self.video_waits.borrow().contains_key(c));
+        if (video || waiting) && let Some(chat) = job.chat() {
+            *self.video_waits.borrow_mut().entry(chat.clone()).or_default() += 1;
+            let _ = self.videos.unbounded_send(job);
+        } else {
+            let _ = self.outbound.unbounded_send(job);
+        }
+    }
+
+    /// One of a chat's jobs has left `videos`.
+    fn video_wait_done(&self, chat: &ConversationId) {
+        let mut waits = self.video_waits.borrow_mut();
+        if let Some(n) = waits.get_mut(chat) {
+            *n -= 1;
+            if *n == 0 {
+                waits.remove(chat);
+            }
+        }
+    }
+
+    /// Re-encodes each send's videos, then queues it to go.
+    async fn video_loop(self: Rc<Self>, mut jobs: mpsc::UnboundedReceiver<Outbound>) {
+        while let Some(mut job) = jobs.next().await {
+            let mut gone = false;
+            if let Outbound::SendImages { message, images, .. } = &mut job {
+                for upload in images.iter_mut() {
+                    if let Some(index) = upload.transcode.take()
+                        && !self.transcode_video(*message, index, &upload.path).await
+                    {
+                        gone = true;
+                        break;
+                    }
+                }
+            }
+            if let Some(chat) = job.chat() {
+                self.video_wait_done(chat);
+            }
+            // Deleted meanwhile: not sent.
+            if !gone {
+                let _ = self.outbound.unbounded_send(job);
+            }
+        }
     }
 
     async fn outbound_loop(self: Rc<Self>, mut jobs: mpsc::UnboundedReceiver<Outbound>) {
@@ -5161,9 +5260,22 @@ impl Actor {
         images: Vec<Upload>,
     ) -> anyhow::Result<Vec<AttachmentPointer>> {
         let mut uploads = Vec::with_capacity(images.len());
-        for Upload { path, file_name, file_type, voice } in images {
+        for Upload { path, file_name, file_type, voice, .. } in images {
+            // Before reading it whole: a video over the limit that couldn't
+            // be re-encoded can be gigabytes.
+            if file_type.is_some()
+                && let Ok(meta) = tokio::fs::metadata(&path).await
+                && crate::too_big_to_send(meta.len() as usize, &crate::remote_config())
+            {
+                let limit = crate::size_limit_label(crate::remote_config().attachment_max_bytes());
+                anyhow::bail!("larger than Signal's {limit} limit");
+            }
             let original = tokio::fs::read(&path).await.with_context(|| format!("reading {}", path.display()))?;
             if let Some(content_type) = file_type {
+                if crate::too_big_to_send(original.len(), &crate::remote_config()) {
+                    let limit = crate::size_limit_label(crate::remote_config().attachment_max_bytes());
+                    anyhow::bail!("larger than Signal's {limit} limit");
+                }
                 let spec = AttachmentSpec {
                     content_type,
                     length: original.len(),
@@ -5205,6 +5317,74 @@ impl Actor {
             .into_iter()
             .map(|r| r.map_err(|e| anyhow::anyhow!("uploading: {e}")))
             .collect()
+    }
+
+    /// Re-encodes a video smaller in place before it's uploaded (Desktop's
+    /// `transcodeAttachment`), with the target for its length and our
+    /// number's country. Left as it was when that fails or the result is
+    /// still over the limit, as Desktop sends the original then.
+    /// `false` when the message is gone.
+    async fn transcode_video(&self, message: i64, index: usize, path: &std::path::Path) -> bool {
+        let phone = self.manager().map(|m| m.registration_data().phone_number.to_string());
+        let source = path.to_owned();
+        // This account's config, read here: it's the backend thread's own.
+        let config = crate::remote_config();
+        let work = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<u64>> {
+            let before = std::fs::metadata(&source)?.len();
+            let info = crate::video::probe(&source).context("not a video it can read")?;
+            let target = crate::video::target_for(phone.as_deref(), info.duration_secs);
+            let temp = source.with_extension("transcoding.mp4");
+            let _ = std::fs::remove_file(&temp);
+            let done = crate::video::transcode(&source, &temp, &target).and_then(|()| Ok(std::fs::metadata(&temp)?.len()));
+            match done {
+                Ok(size) if !crate::too_big_to_send(size as usize, &config) => {
+                    if let Err(error) = std::fs::rename(&temp, &source) {
+                        let _ = std::fs::remove_file(&temp);
+                        return Err(error.into());
+                    }
+                    info!(before, after = size, "re-encoded video");
+                    Ok(Some(size))
+                }
+                Ok(size) => {
+                    let _ = std::fs::remove_file(&temp);
+                    warn!(size, "the re-encoded video is still too big; sending the original");
+                    Ok(None)
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temp);
+                    Err(error)
+                }
+            }
+        });
+        let size = match work.await {
+            Ok(Ok(size)) => size,
+            Ok(Err(error)) => {
+                warn!(error = %format!("{error:#}"), "couldn't re-encode the video; sending the original");
+                None
+            }
+            Err(error) => {
+                warn!(%error, "re-encoding the video stopped");
+                None
+            }
+        };
+        // Tried: not again on a resend, as Desktop clears
+        // `transcodingTargetQuality` whatever came of it.
+        match self.db.finish_attachment_transcode(message, index, size).await {
+            Ok(true) => {
+                if let Ok(Some(m)) = self.db.message(message).await {
+                    self.emit(Event::MessageChanged { conversation: m.conversation_id, message_id: message });
+                }
+                true
+            }
+            Ok(false) => {
+                info!("the video's message is gone; not sending it");
+                false
+            }
+            Err(error) => {
+                warn!(%error, "couldn't record the re-encoded video");
+                true
+            }
+        }
     }
 
     /// The preview image was optimized when it was fetched; upload it as is.

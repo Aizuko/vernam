@@ -349,6 +349,7 @@ mod tests {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         }
     }
 

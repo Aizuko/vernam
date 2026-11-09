@@ -39,6 +39,7 @@ pub mod long_text;
 pub mod release_notes;
 pub mod megaphones;
 pub mod remote_config;
+pub mod video;
 pub mod message_requests;
 pub mod auto_download;
 pub mod routes;

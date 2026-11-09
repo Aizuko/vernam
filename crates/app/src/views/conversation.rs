@@ -5998,6 +5998,7 @@ mod tests {
             remote: None,
             thumbnail_path: None,
             sticker_pack: Some(signal_store::StickerPackRef { id: "9a".repeat(16), key: "01".repeat(32), sticker_id }),
+            transcode: false,
         };
         let mut with_id = message(1, 1_000);
         with_id.attachments.push(sticker(Some(5)));
@@ -6332,6 +6333,7 @@ mod tests {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         };
         let limit = backend.remote_config().attachment_max_receive_bytes();
         let insert = |sent_at: i64, attachments: Vec<AttachmentMeta>| {
@@ -6410,6 +6412,7 @@ mod tests {
             remote: None,
             thumbnail_path: thumbnail.clone(),
             sticker_pack: None,
+            transcode: false,
         };
         let sent_at = chrono::Utc::now().timestamp_millis();
         let [image, video, both]: [i64; 3] = [
@@ -6527,6 +6530,7 @@ mod tests {
                     remote: None,
                     thumbnail_path: None,
                     sticker_pack: None,
+                    transcode: false,
                 }
             })
             .collect();
@@ -6587,6 +6591,7 @@ mod tests {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         };
         let id = futures::executor::block_on(backend.spawn(async move {
             db.insert_message(&signal_store::NewMessage {
@@ -6645,6 +6650,7 @@ mod tests {
                 remote: None,
                 thumbnail_path: None,
                 sticker_pack: None,
+                transcode: false,
             }),
         };
         assert_eq!(full_size_preview_image(&preview(1200, 630)).map(|f| f.1), Some((300., 157.5)));
@@ -7181,6 +7187,7 @@ mod tests {
                     remote: None,
                     thumbnail_path: None,
                     sticker_pack: Some(garden),
+                    transcode: false,
                 }],
                 link_preview: None,
                 expires_in: 0,
@@ -8049,6 +8056,7 @@ mod tests {
             remote: None,
             thumbnail_path: None,
             sticker_pack: None,
+            transcode: false,
         };
         let label = |v, outgoing, a: Option<&AttachmentMeta>| {
             let (_, title, detail) = view_once_label(v, outgoing, a);
