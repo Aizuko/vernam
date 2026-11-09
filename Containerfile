@@ -8,7 +8,7 @@ FROM debian:trixie
 # `./build.sh test --workspace` runs: without them the media and spell
 # check tests skip themselves, quietly running less than the native path.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config protobuf-compiler clang libclang-dev \
         python3 curl ca-certificates git \
         libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
