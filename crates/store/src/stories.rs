@@ -240,22 +240,27 @@ impl AppDb {
     }
 
     /// Where its attachment was saved.
-    pub async fn set_story_file(&self, id: i64, path: &str) -> Result<()> {
+    /// `false` if the story is gone (deleted or expired while it
+    /// downloaded; with `sent_at`, a newer story taking its id counts as
+    /// gone) or has no media: the file isn't kept.
+    pub async fn set_story_file(&self, id: i64, sent_at: Option<i64>, path: &str) -> Result<bool> {
         let mut tx = self.write().await?;
-        let content: Option<String> =
-            sqlx::query_scalar("SELECT content FROM stories WHERE id = ?").bind(id).fetch_optional(&mut *tx).await?;
-        let Some(content) = content else { return Ok(()) };
+        let content: Option<String> = sqlx::query_scalar("SELECT content FROM stories WHERE id = ?1 AND (?2 IS NULL OR sent_at = ?2)")
+            .bind(id)
+            .bind(sent_at)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(content) = content else { return Ok(false) };
         let mut content: StoryContent = serde_json::from_str(&content)?;
-        if let StoryContent::Media { attachment, .. } = &mut content {
-            attachment.local_path = Some(path.to_owned());
-        }
+        let StoryContent::Media { attachment, .. } = &mut content else { return Ok(false) };
+        attachment.local_path = Some(path.to_owned());
         sqlx::query("UPDATE stories SET content = ? WHERE id = ?")
             .bind(serde_json::to_string(&content)?)
             .bind(id)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Marks it viewed. Returns whether it wasn't already.

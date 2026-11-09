@@ -655,6 +655,36 @@ async fn nicknames_follow_storage_and_local_edits() {
 }
 
 #[tokio::test]
+async fn a_preview_image_is_recorded_only_where_it_still_belongs() {
+    let db = test_db().await;
+    db.upsert_conversation(&conv("d:b"), ConversationUpdate::default()).await.unwrap();
+    let image = AttachmentMeta {
+        content_type: "image/png".into(),
+        file_name: None,
+        size: 10,
+        width: None,
+        height: None,
+        local_path: None,
+        sticker: false,
+        gif: false,
+        voice: false,
+        remote: None,
+        thumbnail_path: None,
+        sticker_pack: None,
+        transcode: false,
+    };
+    let preview = |image| LinkPreview { url: "https://example.com".into(), title: None, description: None, date: None, image };
+    let with = db.insert_message(&NewMessage { link_preview: Some(preview(Some(image))), ..incoming("d:b", "b", 1, "a") }).await.unwrap();
+    let without = db.insert_message(&NewMessage { link_preview: Some(preview(None)), ..incoming("d:b", "b", 2, "b") }).await.unwrap();
+    assert!(!db.set_preview_image_path(with, 9, "/tmp/o.png").await.unwrap(), "another message's time");
+    assert!(db.set_preview_image_path(with, 1, "/tmp/p.png").await.unwrap());
+    let saved = db.message(with).await.unwrap().unwrap().link_preview.unwrap().image.unwrap().local_path;
+    assert_eq!(saved.as_deref(), Some("/tmp/p.png"));
+    assert!(!db.set_preview_image_path(without, 2, "/tmp/q.png").await.unwrap(), "no image to fill in");
+    assert!(!db.set_preview_image_path(without + 100, 2, "/tmp/r.png").await.unwrap(), "no such message");
+}
+
+#[tokio::test]
 async fn display_names_take_the_first_source_that_knows_them() {
     let db = test_db().await;
     db.replace_contact_names(&[("a".into(), "Saved A".into())]).await.unwrap();
@@ -1775,7 +1805,10 @@ async fn stories_last_a_day_and_keep_views_and_replies() {
         styles: Vec::new(),
     };
     let ours = db.insert_story(&story(None, now - 500, photo), now).await.unwrap().unwrap();
-    db.set_story_file(ours, "/tmp/x.jpg").await.unwrap();
+    assert!(!db.set_story_file(ours, Some(now - 499), "/tmp/w.jpg").await.unwrap(), "another story's time");
+    assert!(db.set_story_file(ours, Some(now - 500), "/tmp/x.jpg").await.unwrap());
+    assert!(!db.set_story_file(ours + 1_000, None, "/tmp/y.jpg").await.unwrap(), "no such story");
+    assert!(!db.set_story_file(theirs, None, "/tmp/z.jpg").await.unwrap(), "a text story has no file");
 
     let stories = db.stories(now).await.unwrap();
     assert_eq!(stories.iter().map(|s| s.id).collect::<Vec<_>>(), [ours, theirs], "newest first");

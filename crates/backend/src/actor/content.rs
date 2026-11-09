@@ -43,7 +43,7 @@ impl Actor {
                     return;
                 };
                 let (this, manager, conversation) = (self.clone(), manager.clone(), conversation.clone());
-                tokio::task::spawn_local(async move {
+                self.spawn_auto_download(async move {
                     this.download_contact_avatar(&manager, conversation, message_id, &pointer).await
                 });
             }
@@ -76,7 +76,10 @@ impl Actor {
         }
         match self.db.set_contact_avatar_path(message_id, &path.to_string_lossy()).await {
             Ok(true) => self.emit(Event::MessageChanged { conversation, message_id }),
-            Ok(false) => {}
+            // Gone while it downloaded: the file isn't kept.
+            Ok(false) => {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
             Err(error) => self.error("failed to record a shared contact's photo", error),
         }
     }

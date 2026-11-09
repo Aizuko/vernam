@@ -2,6 +2,7 @@
 //! the app database. Runs on a `LocalSet` because presage's futures are `!Send`.
 
 mod call_log;
+mod catch_up;
 mod chat_folders;
 mod content;
 mod call_links;
@@ -579,6 +580,8 @@ struct Actor {
     clock_skewed: std::cell::Cell<bool>,
     /// Held across a captcha challenge's read and write (`challenge.rs`).
     challenge_lock: tokio::sync::Mutex<()>,
+    /// Draining the server's queue (`catch_up.rs`).
+    draining: catch_up::Draining,
 }
 
 pub(crate) async fn run(
@@ -610,7 +613,7 @@ pub(crate) async fn run(
     let actor = Rc::new(Actor {
         config,
         db,
-        events,
+        events: events.clone(),
         store,
         manager: RefCell::new(None),
         self_aci: RefCell::new(String::new()),
@@ -682,6 +685,7 @@ pub(crate) async fn run(
         clock_skewed: std::cell::Cell::new(false),
         challenge_lock: tokio::sync::Mutex::new(()),
         kt_task: RefCell::new(None),
+        draining: catch_up::Draining::new(events),
     });
 
     tokio::task::spawn_local(actor.clone().outbound_loop(outbound_rx));
@@ -732,6 +736,9 @@ async fn open_presage_store(config: &Config) -> anyhow::Result<SqliteStore> {
 
 impl Actor {
     fn emit(&self, event: Event) {
+        if self.holds(&event) {
+            return;
+        }
         let _ = self.events.unbounded_send(event);
     }
 
@@ -1262,6 +1269,7 @@ impl Actor {
     }
 
     async fn wipe(&self) {
+        self.drop_waiting_downloads();
         let mut store = self.store.clone();
         if let Err(error) = store.clear_contents().await {
             warn!(%error, "failed to clear presage contents");
@@ -1305,8 +1313,11 @@ impl Actor {
                     self.receipts_ready.set(false);
                     self.on_connected().await;
                     self.emit(Event::Connection(ConnectionState::Syncing));
+                    let drain = self.drain_started();
                     pin_mut!(stream);
+                    let mut waiting = Instant::now();
                     while let Some(received) = stream.next().await {
+                        let arrived = Instant::now();
                         match &received {
                             // Desktop's "Loading messages from …" screen, for the first catch-up only.
                             Received::Content(content) if !caught_up => {
@@ -1319,8 +1330,13 @@ impl Actor {
                             Received::QueueEmpty => caught_up = true,
                             _ => {}
                         }
+                        let kind = catch_up::envelope_kind(&received);
+                        self.envelope_started();
                         self.on_received(&manager, received).await;
+                        self.envelope_done(kind, arrived - waiting, arrived.elapsed());
+                        waiting = Instant::now();
                     }
+                    drop(drain);
                     info!("message stream ended");
                 }
                 Err(presage::Error::ServiceError(ServiceError::Unauthorized)) => {
@@ -1347,11 +1363,16 @@ impl Actor {
     async fn on_received(self: &Rc<Self>, manager: &SignalManager, received: Received) {
         match received {
             Received::QueueEmpty => {
+                self.drain_finished(true);
                 self.emit(Event::Connection(ConnectionState::Online));
                 // Desktop's `deliveryReceiptQueue.start()` once caught up.
                 self.receipts_ready.set(true);
                 self.schedule_receipts();
-                self.refresh_titles().await;
+                // A contact sync that came while draining re-titles every
+                // chat itself.
+                if !self.apply_held_contacts().await {
+                    self.refresh_titles().await;
+                }
                 // As Desktop reads its caches again at startup, once
                 // what was waiting on the server is in.
                 if !self.early_retried.replace(true) {
@@ -1369,14 +1390,9 @@ impl Actor {
                 }
             }
             Received::Contacts => {
-                info!("contacts synchronized");
-                self.names.borrow_mut().clear();
-                self.titled.borrow_mut().clear();
-                self.refresh_titles().await;
-                self.backfill_author_names().await;
-                self.save_contact_avatars().await;
-                let _ = self.db.set_setting(crate::SETTING_CONTACTS_SYNCED_AT, &now_millis().to_string()).await;
-                self.emit(Event::ContactsSynced);
+                // Renaming waits while the queue drains, done once for however
+                // many came (`catch_up.rs`).
+                self.on_contacts().await;
             }
             Received::DecryptionError(sender, device) => {
                 warn!(sender = %sender.service_id_string(), device, "failed to decrypt message");
@@ -1391,6 +1407,7 @@ impl Actor {
                 let self_aci = self.self_aci();
                 let sender = content.metadata.sender.service_id_string();
                 if sender != self_aci {
+                    let _phase = self.phase("identity");
                     self.check_identity(&sender).await;
                     self.keep_reporting_token(&sender, content.metadata.server_guid).await;
                 }
@@ -1410,10 +1427,12 @@ impl Actor {
                     }
                     let device = u32::from(content.metadata.sender_device);
                     let at = content.metadata.server_timestamp.timestamp_millis();
+                    let _phase = self.phase("call");
                     self.on_call_message(&content.metadata.sender, device, at, call).await;
                     return;
                 }
                 if let Some((key, change, at)) = mapping::group_change_of(&content) {
+                    let _phase = self.phase("group change");
                     self.apply_group_change(key, &change, at).await;
                 }
                 // A newer revision can come without the change itself (the
@@ -1423,6 +1442,7 @@ impl Actor {
                     let conversation = ConversationId::group(&key);
                     let stale = self.group_revisions.borrow().get(&conversation).is_some_and(|seen| *seen < revision);
                     if stale {
+                        let _phase = self.phase("group revision");
                         self.titled.borrow_mut().remove(&conversation);
                         self.ensure_title(&conversation).await;
                         self.emit(Event::ConversationsChanged);
@@ -1431,6 +1451,7 @@ impl Actor {
                         tokio::task::spawn_local(self.clone().refresh_group(conversation));
                     }
                 }
+                let checks = self.phase("checks");
                 // Like Desktop, nothing from someone you blocked gets through.
                 if sender != self_aci && self.is_blocked(&ConversationId::direct(&sender)).await {
                     return;
@@ -1446,6 +1467,7 @@ impl Actor {
                     debug!("story reply from someone we don't share our profile with");
                     return;
                 }
+                drop(checks);
                 let ctx = MapContext { self_aci: &self_aci, now: now_millis() };
                 for mut action in mapping::map_content(&content, &ctx) {
                     // Theirs keep the server's GUID, for a spam report.
@@ -1493,8 +1515,12 @@ impl Actor {
                         }
                         _ => None,
                     };
-                    self.apply(manager, action).await;
+                    {
+                        let _phase = self.phase(catch_up::action_name(&action));
+                        self.apply(manager, action).await;
+                    }
                     if let Some((chat, sent_at)) = receipt {
+                        let _phase = self.phase("delivery receipt");
                         self.queue_delivery_receipt(chat, sender.clone(), sent_at).await;
                     }
                 }
@@ -1529,6 +1555,7 @@ impl Actor {
                 // Every 1:1 message carries the sender's timer (groups take
                 // theirs from the group).
                 if message.conversation_id.as_group().is_none() {
+                    let _phase = self.phase("insert.timer");
                     let by = message.author.clone();
                     let (conversation, seconds, at) = (message.conversation_id.clone(), message.expires_in, message.sent_at);
                     self.apply_timer(&conversation, seconds, timer_version, false, by, at).await;
@@ -1536,10 +1563,15 @@ impl Actor {
                 if message.expires_in > 0 && message.direction == Direction::Outgoing {
                     self.expiry.notify_one();
                 }
+                let phase = self.phase("insert.title");
                 self.ensure_title(&message.conversation_id).await;
+                drop(phase);
+                let phase = self.phase("insert.names");
                 if let Some(author) = &message.author {
                     message.author_name = self.name_of(author).await;
                 }
+                drop(phase);
+                let phase = self.phase("insert.body and quote");
                 if !mentions.is_empty() || !styles.is_empty() {
                     let rendered = self.render_body(&message.body, &mentions, &styles).await;
                     message.body = rendered.0;
@@ -1576,6 +1608,7 @@ impl Actor {
                         }
                     }
                 }
+                drop(phase);
                 let conversation = message.conversation_id.clone();
                 // What downloads on its own: Desktop's media auto-download
                 // choices (Data usage).
@@ -1584,6 +1617,7 @@ impl Actor {
                     .enumerate()
                     .filter(|(ix, _)| message.attachments.get(*ix).is_some_and(downloads_whole))
                     .collect();
+                let store_phase = self.phase("insert.store");
                 // Re-deliveries are de-duplicated by the store; only notify once.
                 let repeat = self
                     .db
@@ -1592,7 +1626,10 @@ impl Actor {
                     .ok()
                     .flatten()
                     .is_some();
-                match self.db.insert_received(&message, view_once, server_guid.as_deref()).await {
+                let inserted = self.db.insert_received(&message, view_once, server_guid.as_deref()).await;
+                drop(store_phase);
+                let _phase = self.phase("insert.after");
+                match inserted {
                     Ok(id) => {
                         // A message request's media waits until it's
                         // accepted (Desktop's `queueAttachmentDownloads`).
@@ -1648,7 +1685,9 @@ impl Actor {
                         // Deletes, edits, reactions, votes, receipts and
                         // syncs that came before it. One read on another
                         // device, or deleted, doesn't notify.
+                        let phase = self.phase("insert.early events");
                         let early = self.apply_early_for(manager, message.author.as_deref(), message.sent_at).await;
+                        drop(phase);
                         if !repeat && !early.read && !early.deleted && message.direction == Direction::Incoming {
                             let me = self.self_aci();
                             // A quote of ours has no author (it's us).
@@ -1679,19 +1718,25 @@ impl Actor {
                                 && crate::auto_download::current().photos
                                 && p.size.is_some_and(|size| crate::remote_config().auto_downloads(u64::from(size)))
                         }) {
+                            let sent_at = message.sent_at;
                             let this = self.clone();
                             let manager = manager.clone();
                             let conversation = conversation.clone();
-                            tokio::task::spawn_local(async move {
-                                this.download_preview_image(&manager, conversation, id, &pointer).await
+                            self.spawn_auto_download(async move {
+                                if !this.has_file(id, sent_at, catch_up::File::Preview).await {
+                                    this.download_preview_image(&manager, conversation, id, sent_at, &pointer).await
+                                }
                             });
                         }
                         for (index, pointer) in downloadable.into_iter().filter(|_| !held) {
+                            let sent_at = message.sent_at;
                             let this = self.clone();
                             let manager = manager.clone();
                             let conversation = conversation.clone();
-                            tokio::task::spawn_local(async move {
-                                this.download(&manager, conversation, id, index, &pointer).await
+                            self.spawn_auto_download(async move {
+                                if !this.has_file(id, sent_at, catch_up::File::Attachment(index)).await {
+                                    this.download(&manager, conversation, id, sent_at, index, &pointer).await
+                                }
                             });
                         }
                     }
@@ -2512,10 +2557,14 @@ impl Actor {
     /// Messages keep the author name known when they arrived. Once names are
     /// learned (storage sync, contact sync, profile fetch), rewrite the ones
     /// that were missing or have changed.
-    async fn backfill_author_names(self: &Rc<Self>) {
+    /// `false` if the authors couldn't be read or renamed.
+    async fn backfill_author_names(self: &Rc<Self>) -> bool {
         let authors = match self.db.message_authors().await {
             Ok(authors) => authors,
-            Err(error) => return self.error("failed to list message authors", error),
+            Err(error) => {
+                self.error("failed to list message authors", error);
+                return false;
+            }
         };
         let self_aci = self.self_aci();
         let mut names = Vec::new();
@@ -2524,17 +2573,22 @@ impl Actor {
                 names.push((author, name));
             }
         }
-        self.rename_authors(names).await;
+        self.rename_authors(names).await
     }
 
-    async fn rename_authors(self: &Rc<Self>, names: Vec<(String, String)>) {
+    /// `false` if the names couldn't be saved.
+    async fn rename_authors(self: &Rc<Self>, names: Vec<(String, String)>) -> bool {
         match self.db.rename_authors(&names).await {
-            Ok(0) => {}
+            Ok(0) => true,
             Ok(_) => {
                 self.emit(Event::AuthorNamesChanged(names));
                 self.emit(Event::ConversationsChanged);
+                true
             }
-            Err(error) => self.error("failed to update author names", error),
+            Err(error) => {
+                self.error("failed to update author names", error);
+                false
+            }
         }
     }
 
@@ -3556,10 +3610,15 @@ impl Actor {
         }
     }
 
-    async fn refresh_titles(self: &Rc<Self>) {
-        let mut all = self.db.conversations().await.unwrap_or_default();
-        all.extend(self.db.archived_conversations().await.unwrap_or_default());
+    /// `false` if the chats couldn't be read or a title couldn't be saved.
+    async fn refresh_titles(self: &Rc<Self>) -> bool {
+        let (Ok(mut all), Ok(archived)) = (self.db.conversations().await, self.db.archived_conversations().await) else {
+            warn!("couldn't read the chats to title them");
+            return false;
+        };
+        all.extend(archived);
         let mut changed = false;
+        let mut saved = true;
         for conversation in all {
             if self.titled.borrow().contains(&conversation.id) {
                 continue;
@@ -3586,6 +3645,7 @@ impl Actor {
                 if differs {
                     changed = true;
                     if !self.upsert_title(&conversation.id, update).await {
+                        saved = false;
                         continue;
                     }
                 }
@@ -3595,6 +3655,7 @@ impl Actor {
         if changed {
             self.emit(Event::ConversationsChanged);
         }
+        saved
     }
 
     async fn resolve_thread(&self, manager: &SignalManager, thread: &mapping::ThreadRef) -> Option<ConversationId> {
@@ -5632,7 +5693,7 @@ impl Actor {
         let Some(pointer) = pointer else {
             return self.error("attachment unavailable", "no such attachment");
         };
-        self.download(&manager, message.conversation_id, message_id, index, &pointer).await;
+        self.download(&manager, message.conversation_id, message_id, message.sent_at, index, &pointer).await;
     }
 
     /// Notes that a message's whole text came as an attachment, and
@@ -5784,6 +5845,7 @@ impl Actor {
         manager: &SignalManager,
         conversation: ConversationId,
         message_id: i64,
+        sent_at: i64,
         index: usize,
         pointer: &AttachmentPointer,
     ) {
@@ -5801,12 +5863,14 @@ impl Actor {
             .config
             .data_dir
             .join("attachments")
-            .join(format!("{message_id}-{index}.{ext}"));
+            // Named for the message's time too: a download for a deleted
+            // message whose id a newer one took never touches its file.
+            .join(format!("{message_id}-{sent_at}-{index}.{ext}"));
         if let Err(error) = tokio::fs::write(&path, &bytes).await {
             return self.error("failed to save attachment", error);
         }
         let path = path.to_string_lossy().into_owned();
-        match self.db.set_attachment_path(message_id, index, &path).await {
+        match self.db.set_downloaded_attachment_path(message_id, sent_at, index, &path).await {
             Ok(true) => self.emit(Event::MessageChanged { conversation, message_id }),
             // Erased (a view-once message viewed elsewhere) or deleted
             // while it downloaded: the file isn't kept.
@@ -6054,6 +6118,7 @@ impl Actor {
         manager: &SignalManager,
         conversation: ConversationId,
         message_id: i64,
+        sent_at: i64,
         pointer: &AttachmentPointer,
     ) {
         let bytes = match manager.get_attachment(pointer).await {
@@ -6064,12 +6129,15 @@ impl Actor {
             .config
             .data_dir
             .join("attachments")
-            .join(format!("{message_id}-preview.{}", extension_for(pointer)));
+            .join(format!("{message_id}-{sent_at}-preview.{}", extension_for(pointer)));
         if let Err(error) = tokio::fs::write(&path, &bytes).await {
             return self.error("failed to save link preview image", error);
         }
-        match self.db.set_preview_image_path(message_id, &path.to_string_lossy()).await {
-            Ok(()) => self.emit(Event::MessageChanged { conversation, message_id }),
+        match self.db.set_preview_image_path(message_id, sent_at, &path.to_string_lossy()).await {
+            Ok(true) => self.emit(Event::MessageChanged { conversation, message_id }),
+            Ok(false) => {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
             Err(error) => self.error("failed to record link preview image", error),
         }
     }

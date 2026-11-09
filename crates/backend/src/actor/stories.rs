@@ -106,8 +106,14 @@ impl Actor {
                     .unwrap_or(0),
             };
             let small = pointer.size.is_some_and(|size| crate::remote_config().auto_downloads(u64::from(size)));
+            // Not waited for: the queue keeps draining meanwhile.
             if small && (story.author.is_none() || theirs <= MAX_STORIES_TO_PREFETCH) {
-                self.download_story(manager, id, &pointer).await;
+                let (this, manager, sent_at) = (self.clone(), manager.clone(), story.sent_at);
+                self.spawn_auto_download(async move {
+                    if !this.has_file(id, sent_at, catch_up::File::Story).await {
+                        this.download_story(&manager, id, Some(sent_at), &pointer).await
+                    }
+                });
             }
         }
     }
@@ -117,20 +123,31 @@ impl Actor {
         self.db.conversation(&ConversationId::direct(service_id)).await.ok().flatten().map(|c| c.title).filter(|t| !t.is_empty())
     }
 
-    async fn download_story(&self, manager: &SignalManager, id: i64, pointer: &AttachmentPointer) {
+    /// With `sent_at`, only into the story sent then (see `set_story_file`).
+    async fn download_story(&self, manager: &SignalManager, id: i64, sent_at: Option<i64>, pointer: &AttachmentPointer) {
         let saved = async {
             let size = pointer.size.map_or(0, u64::from);
             if crate::remote_config().too_big_to_receive(size) {
                 anyhow::bail!("{size} bytes is over Signal's receive limit");
             }
             let bytes = manager.get_attachment(pointer).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-            let path = self.config.data_dir.join("attachments").join(format!("story-{id}.{}", extension_for(pointer)));
+            // (Named for its time too, as `download` names attachments.)
+            let name = match sent_at {
+                Some(sent_at) => format!("story-{id}-{sent_at}.{}", extension_for(pointer)),
+                None => format!("story-{id}.{}", extension_for(pointer)),
+            };
+            let path = self.config.data_dir.join("attachments").join(name);
             tokio::fs::write(&path, &bytes).await?;
-            self.db.set_story_file(id, &path.to_string_lossy()).await?;
-            anyhow::Ok(())
+            // Deleted or expired while it downloaded: the file isn't kept.
+            if !self.db.set_story_file(id, sent_at, &path.to_string_lossy()).await? {
+                let _ = tokio::fs::remove_file(&path).await;
+                return anyhow::Ok(false);
+            }
+            anyhow::Ok(true)
         };
         match saved.await {
-            Ok(()) => self.emit(Event::StoriesChanged),
+            Ok(true) => self.emit(Event::StoriesChanged),
+            Ok(false) => {}
             Err(error) => warn!(error = %format!("{error:#}"), "couldn't download a story"),
         }
     }
@@ -143,7 +160,8 @@ impl Actor {
             _ => None,
         };
         let Some(pointer) = pointer else { return };
-        self.download_story(&manager, id, &pointer).await;
+        let sent_at = self.db.story(id).await.ok().flatten().map(|s| s.sent_at);
+        self.download_story(&manager, id, sent_at, &pointer).await;
     }
 
     pub(super) async fn apply_story_reply(

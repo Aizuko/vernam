@@ -3051,14 +3051,21 @@ impl AppDb {
     /// attachment that already has a path is overwritten with `Ok(true)`,
     /// never `Ok(false)`, so a second download of it keeps its file.
     pub async fn set_attachment_path(&self, message_id: i64, index: usize, path: &str) -> Result<bool> {
-        self.edit_attachment(message_id, index, |att| att.local_path = Some(path.to_owned())).await
+        self.edit_attachment(message_id, None, index, |att| att.local_path = Some(path.to_owned())).await
+    }
+
+    /// `set_attachment_path` for a download started for the message sent at
+    /// `sent_at`: `Ok(false)` if the row is now another message's (it was
+    /// deleted while the file downloaded and a new message took its id).
+    pub async fn set_downloaded_attachment_path(&self, message_id: i64, sent_at: i64, index: usize, path: &str) -> Result<bool> {
+        self.edit_attachment(message_id, Some(sent_at), index, |att| att.local_path = Some(path.to_owned())).await
     }
 
     /// Records that a video was re-encoded before it was sent (with its new
     /// size) or that that was tried and failed (`None`), so it isn't again;
     /// `Ok(false)` as for `set_attachment_path`.
     pub async fn finish_attachment_transcode(&self, message_id: i64, index: usize, size: Option<u64>) -> Result<bool> {
-        self.edit_attachment(message_id, index, |att| {
+        self.edit_attachment(message_id, None, index, |att| {
             att.transcode = false;
             if let Some(size) = size {
                 att.size = size;
@@ -3070,14 +3077,23 @@ impl AppDb {
     /// Records where an attachment's backup thumbnail was saved; `Ok(false)`
     /// as for `set_attachment_path`.
     pub async fn set_attachment_thumbnail(&self, message_id: i64, index: usize, path: &str) -> Result<bool> {
-        self.edit_attachment(message_id, index, |att| att.thumbnail_path = Some(path.to_owned())).await
+        self.edit_attachment(message_id, None, index, |att| att.thumbnail_path = Some(path.to_owned())).await
     }
 
-    async fn edit_attachment(&self, message_id: i64, index: usize, edit: impl FnOnce(&mut AttachmentMeta)) -> Result<bool> {
+    /// Edits one attachment of the message `message_id`, which with
+    /// `sent_at` must also be the message sent then.
+    async fn edit_attachment(
+        &self,
+        message_id: i64,
+        sent_at: Option<i64>,
+        index: usize,
+        edit: impl FnOnce(&mut AttachmentMeta),
+    ) -> Result<bool> {
         let mut tx = self.write().await?;
         let Some(json) =
-            sqlx::query_scalar::<_, String>("SELECT attachments FROM messages WHERE id = ?")
+            sqlx::query_scalar::<_, String>("SELECT attachments FROM messages WHERE id = ?1 AND (?2 IS NULL OR sent_at = ?2)")
                 .bind(message_id)
+                .bind(sent_at)
                 .fetch_optional(&mut *tx)
                 .await?
         else {
@@ -3177,25 +3193,28 @@ impl AppDb {
     }
 
     /// Records where a message's link preview image was saved.
-    pub async fn set_preview_image_path(&self, message_id: i64, path: &str) -> Result<()> {
+    /// `false` if the message sent at `sent_at` or its preview image is
+    /// gone (deleted while it downloaded, its id perhaps taken by a newer
+    /// message): the file isn't kept.
+    pub async fn set_preview_image_path(&self, message_id: i64, sent_at: i64, path: &str) -> Result<bool> {
         let mut tx = self.write().await?;
-        let json: Option<String> = sqlx::query_scalar("SELECT link_preview FROM messages WHERE id = ?")
+        let json: Option<String> = sqlx::query_scalar("SELECT link_preview FROM messages WHERE id = ? AND sent_at = ?")
             .bind(message_id)
+            .bind(sent_at)
             .fetch_optional(&mut *tx)
             .await?
             .flatten();
-        let Some(json) = json else { return Ok(()) };
+        let Some(json) = json else { return Ok(false) };
         let mut preview: LinkPreview = serde_json::from_str(&json)?;
-        if let Some(image) = &mut preview.image {
-            image.local_path = Some(path.to_owned());
-            sqlx::query("UPDATE messages SET link_preview = ? WHERE id = ?")
-                .bind(serde_json::to_string(&preview)?)
-                .bind(message_id)
-                .execute(&mut *tx)
-                .await?;
-        }
+        let Some(image) = &mut preview.image else { return Ok(false) };
+        image.local_path = Some(path.to_owned());
+        sqlx::query("UPDATE messages SET link_preview = ? WHERE id = ?")
+            .bind(serde_json::to_string(&preview)?)
+            .bind(message_id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Full-text search across message bodies (FTS5), newest first.
