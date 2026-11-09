@@ -76,6 +76,9 @@ impl CatchUp {
 
 /// How long to wait for the connection before showing the app anyway.
 const CATCH_UP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// While the queue drains, message changes reload the chat list at most
+/// this often (the backend holds its own chat list changes as long).
+const DRAIN_RELOAD_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a saved setting's value outlasts reloads that don't read it back.
 const PENDING_PREF_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -386,6 +389,9 @@ pub struct AppState {
     pub login_item: crate::login_item::LoginItem,
     reload_task: Option<Task<()>>,
     reload_pending: bool,
+    /// While the server's queue drains, the chat list reload a message
+    /// change asked for (`reload_conversations_soon`).
+    reload_soon: bool,
     /// Demo mode opens the first conversation once loaded.
     auto_select: bool,
     /// System notifications for this account (`None` where they can't be
@@ -578,6 +584,7 @@ impl AppState {
             favorite_sticker_ids: Default::default(),
             reload_task: None,
             reload_pending: false,
+            reload_soon: false,
             auto_select: std::env::var_os("SIGNAL_GPUI_DEMO").is_some(),
             notifier: None,
             shown_notifications: HashMap::new(),
@@ -1106,6 +1113,10 @@ impl AppState {
                     self.end_catch_up(cx);
                 }
                 self.connection = state;
+                // Done draining: a reload put off for it happens now.
+                if self.connection != ConnectionState::Syncing && std::mem::take(&mut self.reload_soon) {
+                    self.reload_conversations(cx);
+                }
             }
             Event::CatchingUp { first, latest } => {
                 if let Some(catch_up) = &mut self.catching_up {
@@ -1129,11 +1140,11 @@ impl AppState {
                     conversation,
                     message_id,
                 });
-                self.reload_conversations(cx);
+                self.reload_conversations_soon(cx);
             }
             Event::MessageRemoved { conversation, message_id } => {
                 cx.emit(AppEvent::MessageRemoved { conversation, message_id });
-                self.reload_conversations(cx);
+                self.reload_conversations_soon(cx);
             }
             Event::PinsChanged(conversation) => cx.emit(AppEvent::PinsChanged(conversation)),
             Event::SafetyNumber { conversation, result } => {
@@ -1451,6 +1462,29 @@ impl AppState {
     }
 
     /// Reloads the conversation list, coalescing bursts (e.g. initial sync).
+    /// A message changed: the chat list follows at once, except while the
+    /// server's queue drains, when every message would reload it (its query
+    /// reads every chat; 2.4 seconds on a real account). Then it reloads at
+    /// most every `DRAIN_RELOAD_INTERVAL`, and once the drain ends.
+    fn reload_conversations_soon(&mut self, cx: &mut Context<Self>) {
+        if self.connection != ConnectionState::Syncing {
+            return self.reload_conversations(cx);
+        }
+        if std::mem::replace(&mut self.reload_soon, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DRAIN_RELOAD_INTERVAL).await;
+            let _ = this.update(cx, |this, cx| {
+                // (Unless the drain's end has already reloaded it.)
+                if std::mem::take(&mut this.reload_soon) {
+                    this.reload_conversations(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     pub fn reload_conversations(&mut self, cx: &mut Context<Self>) {
         if self.reload_task.is_some() {
             self.reload_pending = true;
@@ -3263,5 +3297,36 @@ mod link_tests {
         });
         wait(cx, "Dana's chat", &mut |cx| state.read_with(cx, |s, _| s.selected.as_ref().map(|c| c.0.as_str()) == Some(DANA)));
         backend.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use gpui_kit::TestAppContext;
+
+    use super::*;
+    use crate::views::test_support::{demo, wait};
+
+    #[gpui_kit::test]
+    fn message_changes_reload_the_chat_list_less_often_while_draining(cx: &mut TestAppContext) {
+        let (_backend, state, mut cx, _dir) = demo(cx);
+        let cx = &mut cx;
+        wait(cx, "the chats", &mut |cx| state.read_with(cx, |s, _| !s.conversations.is_empty() && s.reload_task.is_none()));
+        let changed = || Event::MessageChanged { conversation: ConversationId("d:someone".into()), message_id: 1 };
+        let reloading = |cx: &mut gpui_kit::VisualTestContext| state.read_with(cx, |s, _| (s.reload_task.is_some(), s.reload_soon));
+
+        // Draining: put off, once for many.
+        state.update(cx, |s, cx| s.handle(Event::Connection(ConnectionState::Syncing), cx));
+        state.update(cx, |s, cx| s.handle(changed(), cx));
+        state.update(cx, |s, cx| s.handle(changed(), cx));
+        assert_eq!(reloading(cx), (false, true));
+        // Done draining: at once.
+        state.update(cx, |s, cx| s.handle(Event::Connection(ConnectionState::Online), cx));
+        assert_eq!(reloading(cx), (true, false));
+
+        // Online: at once.
+        wait(cx, "the reload", &mut |cx| state.read_with(cx, |s, _| s.reload_task.is_none()));
+        state.update(cx, |s, cx| s.handle(changed(), cx));
+        assert_eq!(reloading(cx), (true, false));
     }
 }
