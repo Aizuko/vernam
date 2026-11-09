@@ -1,7 +1,8 @@
 # Everything building Vernam needs, so the host needs nothing but podman.
 # Debian trixie is the release the workspace is verified with: its protoc
 # is the 3.21 line the build scripts run, and its libclang is what
-# bindgen links.
+# bindgen links. The well-known-type protos (google/protobuf/*.proto)
+# come with libprotobuf-dev, not protobuf-compiler.
 FROM debian:trixie
 
 # ffmpeg and a hunspell dictionary are for the tests, which the README's
@@ -9,7 +10,7 @@ FROM debian:trixie
 # check tests skip themselves, quietly running less than the native path.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential cmake pkg-config protobuf-compiler clang libclang-dev \
+        build-essential cmake pkg-config protobuf-compiler libprotobuf-dev clang libclang-dev \
         python3 curl ca-certificates git \
         libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
         libwayland-dev libvulkan-dev libudev-dev libasound2-dev \
