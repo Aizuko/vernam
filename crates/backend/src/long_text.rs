@@ -11,14 +11,14 @@ use unicode_segmentation::UnicodeSegmentation as _;
 pub const MAX_BODY_BYTES: usize = 2 * 1024;
 
 /// The longest text that can be sent, in UTF-8 bytes (Desktop's
-/// `MAX_BODY_ATTACHMENT_BYTE_LENGTH`; its composer refuses more).
+/// `MAX_PLAINTEXT_BODY_ATTACHMENT_BYTE_LENGTH`; its composer refuses more).
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 
-/// Received long texts bigger than this aren't downloaded: the encrypted
-/// size of a 64 KiB text, as Desktop's `AttachmentDownloadManager` checks
-/// (`getAttachmentCiphertextSize` of `MAX_BODY_ATTACHMENT_BYTE_LENGTH`).
+/// Received long texts bigger than this aren't downloaded: 64 KiB of
+/// text, compared with the size the sender gave, as Desktop's
+/// `AttachmentDownloadManager` checks (`MAX_PLAINTEXT_BODY_ATTACHMENT_BYTE_LENGTH`).
 pub fn max_receive_bytes() -> u64 {
-    ciphertext_size(MAX_TEXT_BYTES as u64)
+    MAX_TEXT_BYTES as u64
 }
 
 /// Downloads of a long text tried on their own before it waits for a
@@ -78,11 +78,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_receive_limit_is_the_padded_ciphertext_of_64_kib() {
+    fn the_receive_limit_is_64_kib_of_text() {
         // Worked out with Desktop's formulas separately.
         assert_eq!(log_pad(MAX_TEXT_BYTES as u64), 67_789);
         assert_eq!(log_pad(67_789), 67_789, "padding twice changes nothing");
-        assert_eq!(max_receive_bytes(), 67_840);
+        assert_eq!(ciphertext_size(MAX_TEXT_BYTES as u64), 67_840);
+        assert_eq!(max_receive_bytes(), 65_536);
         assert_eq!(log_pad(10), 541, "at least 541 bytes");
     }
 

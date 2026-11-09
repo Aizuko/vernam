@@ -1070,9 +1070,10 @@ pub struct OutgoingFile {
 pub const VOICE_CONTENT_TYPE: &str = "audio/aac";
 
 /// Whether `len` bytes are over Signal's attachment size limit
-/// (`global.attachments.maxBytes`, see [`RemoteConfig::attachment_max_bytes`]).
+/// (`global.attachments.maxBytes`, see [`RemoteConfig::attachment_max_bytes`]),
+/// padded and encrypted as Desktop compares them (`isAttachmentTooLarge`).
 pub fn too_big_to_send(len: usize, config: &RemoteConfig) -> bool {
-    len as u64 > config.attachment_max_bytes()
+    remote_config::too_large(len as u64, config.attachment_max_bytes())
 }
 
 /// A size limit as Desktop shows it (`getRenderDetailsForLimit` in

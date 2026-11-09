@@ -5604,7 +5604,7 @@ impl Actor {
     ) {
         // Too big to receive: left undownloaded, as Desktop leaves it.
         let size = pointer.size.map_or(0, u64::from);
-        if size > crate::remote_config().attachment_max_receive_bytes() {
+        if crate::remote_config().too_big_to_receive(size) {
             return info!(size, "not downloading an attachment over the receive limit");
         }
         let bytes = match manager.get_attachment(pointer).await {
@@ -5759,7 +5759,7 @@ impl Actor {
         meta: &AttachmentMeta,
     ) -> anyhow::Result<()> {
         let remote = meta.remote.as_ref().context("no locator")?;
-        if meta.size > crate::remote_config().attachment_max_receive_bytes() {
+        if crate::remote_config().too_big_to_receive(meta.size) {
             anyhow::bail!("it's over Signal's receive limit");
         }
         let bytes = self.remote_bytes(manager, remote, meta.size).await?;

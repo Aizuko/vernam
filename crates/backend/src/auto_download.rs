@@ -1,9 +1,10 @@
 //! Desktop's media auto-download (Data usage, `auto-download-attachment`):
 //! which kinds of attachment download as they arrive. Like Desktop
 //! (`ts/util/queueAttachmentDownloads.preload.ts`), a video (a GIF too) is
-//! a video, an image a photo, a voice message under 100 KiB and a sticker
+//! a video, an image a photo, a voice message within 100 KiB and a sticker
 //! always download, other audio is audio, the rest documents; and nothing
-//! at or over the remote config's limit downloads on its own.
+//! over the remote config's limit downloads on its own. Sizes are compared
+//! padded and encrypted, as Desktop's `isAttachmentTooLarge` does.
 
 use signal_store::AttachmentMeta;
 
@@ -46,7 +47,8 @@ impl AutoDownload {
     /// Whether `attachment` downloads as it arrives.
     pub fn downloads(&self, attachment: &AttachmentMeta) -> bool {
         let kind = attachment.content_type.as_str();
-        let chosen = if attachment.sticker || (attachment.voice && attachment.size < MAX_VOICE_BYTES) {
+        let small_voice = attachment.voice && !crate::remote_config::too_large(attachment.size, MAX_VOICE_BYTES);
+        let chosen = if attachment.sticker || small_voice {
             true
         } else if kind.starts_with("video/") || attachment.gif {
             self.videos
@@ -111,6 +113,9 @@ mod tests {
         assert!(none.downloads(&voice));
         let long_voice = AttachmentMeta { voice: true, ..meta("audio/aac", 500_000) };
         assert!(!none.downloads(&long_voice) && all.downloads(&long_voice));
+        // 100 KiB less a byte is over 100 KiB once padded and encrypted.
+        let edge_voice = AttachmentMeta { voice: true, ..meta("audio/aac", 100 * 1024 - 1) };
+        assert!(!none.downloads(&edge_voice));
         let sticker = AttachmentMeta { sticker: true, ..meta("image/webp", 20_000) };
         assert!(none.downloads(&sticker));
         // Over the remote config's limit, nothing downloads on its own.

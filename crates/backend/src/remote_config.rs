@@ -222,9 +222,17 @@ impl RemoteConfig {
     }
 
     /// Whether an attachment of `size` bytes downloads without asking
-    /// (Desktop's `isAutoDownloadEnabled`: smaller than the limit).
+    /// (Desktop's `isAutoDownloadEnabled`: its padded ciphertext within the
+    /// limit).
     pub fn auto_downloads(&self, size: u64) -> bool {
-        size < self.auto_download_max_bytes()
+        !too_large(size, self.auto_download_max_bytes())
+    }
+
+    /// Whether an attachment of `size` bytes is too big to download
+    /// (Desktop's `runDownloadAttachmentJobInner`: its padded ciphertext
+    /// over `attachment_max_receive_bytes`).
+    pub fn too_big_to_receive(&self, size: u64) -> bool {
+        too_large(size, self.attachment_max_receive_bytes())
     }
 
     /// Members a group should have at most (`global.groupsv2.maxGroupSize`;
@@ -260,6 +268,14 @@ impl RemoteConfig {
     fn bytes(&self, key: &str, fallback: u64) -> u64 {
         self.int(key).and_then(|n| u64::try_from(n).ok()).unwrap_or(fallback)
     }
+}
+
+/// Whether an attachment of `plaintext` bytes is over a limit on the
+/// bytes that cross the network: the limits are compared with its padded,
+/// encrypted size (Desktop's `isAttachmentTooLarge` in
+/// `ts/types/AttachmentSize.std.ts`).
+pub fn too_large(plaintext: u64, ciphertext_limit: u64) -> bool {
+    crate::long_text::ciphertext_size(plaintext) > ciphertext_limit
 }
 
 /// A service id in one of a proto's two fields for it
@@ -422,8 +438,11 @@ mod tests {
         assert_eq!(empty.group_size_recommended(), 151);
         assert_eq!(empty.group_size_hard_limit(), 1001);
         assert_eq!((empty.username_nickname_min(), empty.username_nickname_max()), (3, 32));
-        assert!(empty.auto_downloads(200 * MIB - 1));
-        assert!(!empty.auto_downloads(200 * MIB));
+        // Compared padded and encrypted, which adds about 5%.
+        assert!(empty.auto_downloads(190 * MIB));
+        assert!(!empty.auto_downloads(200 * MIB - 1));
+        assert!(!empty.too_big_to_receive(119 * MIB));
+        assert!(empty.too_big_to_receive(125 * MIB - 1));
     }
 
     #[test]
@@ -485,6 +504,15 @@ mod tests {
         assert_eq!(parse_int("1.5"), Some(1));
         assert_eq!(parse_int("x1"), None);
         assert_eq!(parse_int(""), None);
+    }
+
+    #[test]
+    fn sends_are_limited_padded_and_encrypted() {
+        let config = RemoteConfig::default();
+        assert!(!crate::too_big_to_send(90 * MIB as usize, &config));
+        // Under 100 MiB as it is, over once padded and encrypted (Desktop's
+        // `isAttachmentTooLarge`).
+        assert!(crate::too_big_to_send(99 * MIB as usize, &config));
     }
 
     #[test]

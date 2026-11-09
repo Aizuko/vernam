@@ -120,7 +120,7 @@ impl Actor {
     async fn download_story(&self, manager: &SignalManager, id: i64, pointer: &AttachmentPointer) {
         let saved = async {
             let size = pointer.size.map_or(0, u64::from);
-            if size > crate::remote_config().attachment_max_receive_bytes() {
+            if crate::remote_config().too_big_to_receive(size) {
                 anyhow::bail!("{size} bytes is over Signal's receive limit");
             }
             let bytes = manager.get_attachment(pointer).await.map_err(|e| anyhow::anyhow!("{e}"))?;

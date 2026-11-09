@@ -5408,9 +5408,10 @@ fn open_pin_dialog(state: Entity<AppState>, message_id: i64, pinned: usize, disa
 
 /// An attachment over Signal's receive limit, which isn't downloaded or
 /// shown (Desktop's `wasTooBig`, `ts/jobs/AttachmentDownloadManager.preload.ts`).
-/// `max`: the account's limit (`attachment_max_receive_bytes`).
+/// `max`: the account's limit (`attachment_max_receive_bytes`), which the
+/// padded, encrypted size is compared with (Desktop's `isAttachmentTooLarge`).
 fn too_big(attachment: &AttachmentMeta, max: u64) -> bool {
-    attachment.local_path.is_none() && attachment.size > max
+    attachment.local_path.is_none() && signal_backend::remote_config::too_large(attachment.size, max)
 }
 
 /// What stands in for attachments too big to receive, in Desktop's words
@@ -6301,14 +6302,17 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         let alone = insert(now, vec![file("huge.zip", limit + 1)]);
         let mixed = insert(now + 1, vec![file("small.zip", 10), file("huge.zip", limit + 1)]);
-        let fits = insert(now + 2, vec![file("edge.zip", limit)]);
+        // Compared padded and encrypted: just under the limit is over it.
+        let fits = insert(now + 2, vec![file("edge.zip", limit * 9 / 10)]);
+        let padded = insert(now + 3, vec![file("near.zip", limit - 1)]);
         let message = |id: i64| {
             let db = backend.db().clone();
             futures::executor::block_on(backend.spawn(async move { db.message(id).await })).unwrap().unwrap()
         };
         assert_eq!(too_big_text(&message(alone), limit), Some("Attachment too large to display."));
         assert_eq!(too_big_text(&message(mixed), limit), Some("Some attachments are too large to display."));
-        assert_eq!(too_big_text(&message(fits), limit), None, "the limit itself is allowed");
+        assert_eq!(too_big_text(&message(fits), limit), None);
+        assert_eq!(too_big_text(&message(padded), limit), Some("Attachment too large to display."));
 
         let mut cx = open(cx, &backend, NOTE_TO_SELF);
         bounds(&mut cx, format!("too-big-{alone}"));
