@@ -131,13 +131,15 @@ mod linux {
     }
 
     /// The socket the running Vernam reads `sgnl://` links on, one per
-    /// user and data directory (`/run/user/<uid>`, else `/tmp`): two
-    /// Vernams with different data directories (a development profile
-    /// beside the real account) run side by side, as they do on macOS.
+    /// user and data directory, in the directory: two Vernams with
+    /// different data directories (a development profile beside the real
+    /// account) run side by side, as they do on macOS. In the directory,
+    /// not `/run/user`, so the hand-off crosses mount namespaces: a
+    /// firejail'd instance shares only the whitelisted directory with
+    /// the unjailed launcher a desktop link runs. The uid in the name
+    /// keeps the path distinct when a directory is ever shared between
+    /// users.
     pub(crate) fn socket_path(data_dir: &std::path::Path) -> Option<PathBuf> {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
         // FNV-1a, not DefaultHasher: the name must match across builds (an
         // update relaunching beside the old instance), and std doesn't
         // promise to keep DefaultHasher's algorithm.
@@ -145,7 +147,7 @@ mod linux {
         for byte in data_dir.as_os_str().as_bytes() {
             hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
         }
-        Some(runtime.join(format!("vernam-{}-{hash:016x}.links", unsafe { libc::getuid() })))
+        Some(data_dir.join(format!("vernam-{}-{hash:016x}.links", unsafe { libc::getuid() })))
     }
 
     /// Hands `sgnl://` links to the Vernam of the same data directory
@@ -166,9 +168,9 @@ mod linux {
         tx: mpsc::UnboundedSender<String>,
     ) -> bool {
         let uid = unsafe { libc::getuid() };
-        // Only a listener of this user takes the links: the socket may live
-        // in a world-writable directory, where another user's process could
-        // hold the path, and the links carry linking secrets.
+        // Only a listener of this user takes the links: the data
+        // directory is wherever the user pointed the app at, and the
+        // links carry linking secrets.
         let take = |stream: UnixStream| peer_uid(&stream) == Some(uid) && send_links(stream, links);
         if let Ok(stream) = UnixStream::connect(socket) {
             if take(stream) {
@@ -394,6 +396,7 @@ mod linux_tests {
         let two = linux::socket_path(std::path::Path::new("/tmp/two")).unwrap();
         assert_eq!(one, one_again, "a data directory keeps its socket");
         assert_ne!(one, two, "different data directories don't hand off to each other");
+        assert!(one.starts_with("/tmp/one"), "the socket lives in its data directory");
     }
 }
 
