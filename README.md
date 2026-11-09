@@ -19,7 +19,7 @@ It stays small as you use it:
 
 The goal is to do what Signal Desktop does, the way it does it. When behavior is in question, the answer comes from reading Desktop's source, and the code cites the file it follows. That covers the everyday things (messages, replies, reactions, edits, deletes, mentions, formatting, stickers, GIFs, link previews, voice messages, disappearing messages, pins, groups) and the less visible ones:
 
-- **Voice and video calls**, 1:1 and in groups, with screen sharing, through RingRTC, the calling library Desktop uses.
+- **Voice and video calls**, 1:1 and in groups, with screen sharing (macOS only for now), through RingRTC, the calling library Desktop uses.
 - **Stories**: viewing, posting text, photo and video stories, replies, and story privacy from your phone.
 - **Message history when linking**: like Desktop's "link and sync", your phone sends your history, which is downloaded, decrypted and imported.
 - **Sync with your other devices**: pins, archived, muted and unread chats, blocks, hidden stories and settings go through Signal's Storage Service, editing only the fields that changed and keeping the ones this client doesn't know.
@@ -59,6 +59,8 @@ SIGNAL_GPUI_BACKGROUND=1 …                                       # open withou
 Each account's data is in `accounts/<id>/` in the data directory, beside the app's logs and window position; the first launch of a build with accounts moves the one account's data there. The database key lives in the login keychain, and Keychain access depends on the app's code signature: unsigned builds ask for your password after every rebuild. A free "Apple Development" certificate from Xcode stops that, and `scripts/bundle.sh` signs with it. [docs/signing.md](docs/signing.md) has the steps.
 
 macOS only shows notifications, and only grants camera and microphone access, to an app bundle. `cargo run` runs the app from `target/<profile>/Vernam.app`; for a build you start yourself, `scripts/bundle.sh` makes the bundle. `mise run bundle` does both: it builds release and makes `target/release/Vernam.app`.
+
+Linux runs the same app. The build needs the GPUI system packages and the tools macOS needs anyway (Debian's names): `apt install build-essential cmake pkg-config protobuf-compiler clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libudev-dev libasound2-dev ffmpeg`. ffmpeg plays media at run time here, decoding what macOS gets from the system's frameworks, and `libasound2` is the microphone. The database key lives in a file beside the data, not a keychain. Notifications go through a freedesktop notification daemon (Plasma's offer a reply field; most others don't), spell check uses an installed hunspell dictionary such as `hunspell-en-us`, the unread count reaches shells that read Unity's launcher API, and screen sharing is macOS only for now. The first launch writes a desktop file with icons (`~/.local/share/applications/io.github.knpwrs.vernam.desktop`), which registers Vernam as a `sgnl://` handler; opening a link starts Vernam or hands the link to the one already running.
 
 GIF search needs your own Giphy API key (free at developers.giphy.com), pasted in the GIFs tab or set as `GIPHY_API_KEY`. Signal Desktop's key belongs to Signal, so it isn't used here.
 
