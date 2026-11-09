@@ -19,9 +19,10 @@ const CALLS: &str = "author_key = 'notice' AND json_extract(notice, '$.type') IN
 pub enum GroupCallStatus {
     /// Someone started it; we weren't rung and haven't joined.
     Generic,
-    /// We rang the group (Desktop has it, though it never sets it).
+    /// We rang the group, here or on another device.
     OutgoingRing,
-    /// It rang us (or, ours, it's ringing them).
+    /// It rang us (or, in records from before `OutgoingRing` was set, ours
+    /// rang them).
     Ringing,
     /// We joined without being rung.
     Joined,
@@ -61,6 +62,8 @@ pub fn transition_group_call(previous: Option<GroupCallStatus>, event: CallHisto
             Some(status @ (S::Joined | S::OutgoingRing | S::Accepted)) => status,
         },
         E::Started => S::Generic,
+        // Ours rings the group (Desktop commit ab761fe).
+        E::Ringing if !incoming => S::OutgoingRing,
         E::Ringing => S::Ringing,
         E::Missed => S::Missed,
         E::Declined => S::Declined,
@@ -527,6 +530,9 @@ mod tests {
         assert_eq!(transition_group_call(Some(S::Joined), E::Started, true), S::Generic);
         assert_eq!(transition_group_call(Some(S::Ringing), E::Missed, true), S::Missed);
         assert_eq!(transition_group_call(None, E::Declined, true), S::Declined);
+        // Ours rings: an outgoing ring, which joining leaves as it is.
+        assert_eq!(transition_group_call(None, E::Ringing, false), S::OutgoingRing);
+        assert_eq!(transition_group_call(Some(S::OutgoingRing), E::Accepted, false), S::OutgoingRing);
         assert_eq!(transition_group_call(None, E::Hangup, true), S::Declined);
         assert_eq!(transition_group_call(None, E::Hangup, false), S::Missed);
         assert_eq!(transition_group_call(None, E::RemoteHangup, true), S::Missed);

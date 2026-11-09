@@ -26,13 +26,20 @@ const MAX_RING_SIZE: usize = 16;
 /// Where a group call's event comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HistorySource {
-    /// Here: our other devices hear of an accepted call.
+    /// Here: our other devices hear of a call we took part in.
     Local,
     /// Someone's `groupCallUpdate`: recorded only if the call is new to us
     /// (Desktop's `updateCallHistoryForGroupCallOnPeek`).
     IfNew,
     /// Another of our devices' call event sync, which isn't echoed back.
     OtherDevice,
+}
+
+/// Whether a group call's status change here is told to our other devices
+/// (Desktop's `statusToProto` and `updateCallHistoryFromLocalEvent`): one
+/// we took part in, each time it changes.
+fn syncs_group_call(status: GroupCallStatus, previous: Option<GroupCallStatus>) -> bool {
+    matches!(status, GroupCallStatus::Accepted | GroupCallStatus::Joined | GroupCallStatus::OutgoingRing) && previous != Some(status)
 }
 
 /// The group call we're in, joining, or being rung for.
@@ -578,10 +585,11 @@ impl Actor {
     }
 
     /// Applies an event to a group call's record (Desktop's
-    /// `updateCallHistoryFromLocalEvent`), and tells our other devices once
-    /// we've accepted it: of a group call's statuses, Desktop syncs only
-    /// that one (`statusToProto`; the declined one it would send, other
-    /// devices refuse for a group call).
+    /// `updateCallHistoryFromLocalEvent`), and tells our other devices when
+    /// its status changes to one we took part in: accepted, joined, or our
+    /// own ring, each synced as accepted (`statusToProto`, which added the
+    /// last two in Desktop commit ab761fe; the declined one it would send,
+    /// other devices refuse for a group call).
     pub(super) async fn group_call_history(
         &self,
         conversation: &ConversationId,
@@ -601,17 +609,16 @@ impl Actor {
         // A call notice may have started disappearing.
         self.expiry.notify_one();
         if source == HistorySource::Local
-            && change.status == GroupCallStatus::Accepted
-            && change.previous != Some(GroupCallStatus::Accepted)
+            && syncs_group_call(change.status, change.previous)
             && let Some(key) = conversation.as_group().and_then(|k| <[u8; 32]>::try_from(k).ok())
         {
             self.sync_group_call_event(key, record.call_id, change.sent_at, change.incoming);
         }
     }
 
-    /// Desktop's call event sync for a group call we accepted
-    /// (`getProtoForCallHistory`): the group's identifier, the call id and
-    /// its time.
+    /// Desktop's call event sync for a group call we accepted, joined or
+    /// rang (`getProtoForCallHistory`): the group's identifier, the call id
+    /// and its time.
     fn sync_group_call_event(&self, key: [u8; 32], call_id: i64, at: i64, incoming: bool) {
         use presage::proto::sync_message::call_event::{Direction, Event as CallEventKind, Type};
         let event = presage::proto::sync_message::CallEvent {
@@ -881,6 +888,24 @@ pub(super) fn method_of(method: signal_calls::HttpMethod) -> reqwest::Method {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calls_we_took_part_in_are_synced_once_per_status() {
+        use signal_store::GroupCallStatus as S;
+        let syncs = super::syncs_group_call;
+        // Joined without a ring, rang ourselves, or joined after a ring.
+        assert!(syncs(S::Joined, Some(S::Generic)));
+        assert!(syncs(S::Joined, None));
+        assert!(syncs(S::OutgoingRing, None));
+        assert!(syncs(S::Accepted, Some(S::Ringing)));
+        // Unchanged: not again.
+        assert!(!syncs(S::Joined, Some(S::Joined)));
+        assert!(!syncs(S::Accepted, Some(S::Accepted)));
+        // Calls we had no part in.
+        for status in [S::Generic, S::Ringing, S::Missed, S::Declined] {
+            assert!(!syncs(status, None));
+        }
+    }
+
     #[test]
     fn the_calling_server_client_trusts_signals_root() {
         assert!(crate::signal_tls().is_ok());
