@@ -5235,6 +5235,23 @@ fn message_menu(
                 .on_click(move |_, _, cx| download_attachments(downloadable.clone(), cx)),
         );
     }
+    // Desktop's "Add to Favorites" / "Remove from Favorites" on a sticker
+    // (`MessageContextMenu`, Desktop commit 87df778), with favorites on.
+    if let Some((pack_id, pack_key, sticker_id)) = message_sticker(message).filter(|_| !message.deleted)
+        && state.read(cx).remote_config().sticker_favorites()
+    {
+        let favorite = state.read(cx).favorite_sticker_ids.contains(&(pack_id.clone(), sticker_id));
+        let (label, icon) = if favorite { ("Remove from Favorites", IconName::StarOff) } else { ("Add to Favorites", IconName::Star) };
+        let state = state.clone();
+        menu = menu.item(PopupMenuItem::new(label).icon(icon).on_click(move |_, _, cx| {
+            state.read(cx).send(Command::SetStickerFavorite {
+                pack_id: pack_id.clone(),
+                pack_key: pack_key.clone(),
+                sticker_id,
+                favorite: !favorite,
+            })
+        }));
+    }
     // Desktop doesn't forward polls or view-once messages (`canForward`).
     if !message.deleted && message.poll.is_none() && message.view_once.is_none() {
         let state = state.clone();
@@ -5322,6 +5339,14 @@ fn message_menu(
         );
     }
     menu
+}
+
+/// A sticker message's pack id, pack key and sticker id, when it kept them
+/// (Desktop's `stickerRef` in `getPropsForMessage`).
+fn message_sticker(message: &Message) -> Option<(Vec<u8>, Vec<u8>, u32)> {
+    let sticker = message.attachments.iter().find(|a| a.sticker)?;
+    let pack = sticker.sticker_pack.as_ref()?;
+    Some((hex::decode(&pack.id).ok()?, hex::decode(&pack.key).ok()?, pack.sticker_id?))
 }
 
 /// Desktop's "Pin message for..." dialog: how long, then (with three
@@ -5954,6 +5979,34 @@ mod tests {
         let mut reacted = older.clone();
         reacted.reactions.push(signal_store::Reaction { emoji: "😂".into(), author: None, sent_at: 1_500 });
         assert!(!super::same_group(&reacted, &newer), "the reacted message ends its group");
+    }
+
+    /// A sticker can be favorited from its message once the message kept
+    /// the sticker's id (Desktop's `stickerRef`).
+    #[test]
+    fn a_sticker_message_names_its_sticker_for_favoriting() {
+        let sticker = |sticker_id| AttachmentMeta {
+            content_type: "image/webp".into(),
+            file_name: None,
+            size: 0,
+            width: None,
+            height: None,
+            local_path: None,
+            sticker: true,
+            gif: false,
+            voice: false,
+            remote: None,
+            thumbnail_path: None,
+            sticker_pack: Some(signal_store::StickerPackRef { id: "9a".repeat(16), key: "01".repeat(32), sticker_id }),
+        };
+        let mut with_id = message(1, 1_000);
+        with_id.attachments.push(sticker(Some(5)));
+        assert_eq!(super::message_sticker(&with_id), Some((vec![0x9a; 16], vec![0x01; 32], 5)));
+        // Stored before the id was kept, or not a sticker: nothing to favorite.
+        let mut older = message(2, 2_000);
+        older.attachments.push(sticker(None));
+        assert_eq!(super::message_sticker(&older), None);
+        assert_eq!(super::message_sticker(&message(3, 3_000)), None);
     }
 
     /// As a group admin, deleting theirs asks first; deleting only ours
@@ -7101,7 +7154,7 @@ mod tests {
         let (backend, _dir) = demo_backend(cx);
         wait_for_messages(&backend, MAYA, 1, |m| m.body == MAYA_LAST);
         // A sticker from the demo's Garden dots pack.
-        let garden = signal_store::StickerPackRef { id: "9a".repeat(16), key: "00".repeat(32) };
+        let garden = signal_store::StickerPackRef { id: "9a".repeat(16), key: "00".repeat(32), sticker_id: None };
         let db = backend.db().clone();
         let sticker = futures::executor::block_on(backend.spawn(async move {
             let now = chrono::Utc::now().timestamp_millis();

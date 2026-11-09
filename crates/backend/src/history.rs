@@ -929,7 +929,11 @@ async fn import_item(
             meta.sticker = true;
             let pack = &sticker.sticker;
             meta.sticker_pack = (pack.packId.len() == 16 && pack.packKey.len() == 32)
-                .then(|| signal_store::StickerPackRef { id: hex::encode(&pack.packId), key: hex::encode(&pack.packKey) });
+                .then(|| signal_store::StickerPackRef {
+                    id: hex::encode(&pack.packId),
+                    key: hex::encode(&pack.packKey),
+                    sticker_id: Some(pack.stickerId),
+                });
             let message = NewMessage {
                 conversation_id: conversation.clone(),
                 sent_at: item.dateSent as i64,
@@ -1573,6 +1577,7 @@ mod tests {
         let mut sticker = proto::StickerMessage::new();
         sticker.sticker.mut_or_insert_default().packId = vec![0xab; 16];
         sticker.sticker.mut_or_insert_default().packKey = vec![0xcd; 32];
+        sticker.sticker.mut_or_insert_default().stickerId = 4;
         push(proto::Frame {
             item: Some(proto::frame::Item::ChatItem(item(20, 2, 3_500, true, Item::StickerMessage(sticker)))),
             ..Default::default()
@@ -1713,7 +1718,7 @@ mod tests {
         assert!(sticker.sticker);
         assert_eq!(
             sticker.sticker_pack,
-            Some(signal_store::StickerPackRef { id: "ab".repeat(16), key: "cd".repeat(32) })
+            Some(signal_store::StickerPackRef { id: "ab".repeat(16), key: "cd".repeat(32), sticker_id: Some(4) })
         );
 
         // The phone's release notes are the Signal chat's.

@@ -1282,7 +1282,11 @@ fn map_data_message(dm: &DataMessage, origin: Origin, ts: i64, ctx: &MapContext)
                 let mut metas: Vec<AttachmentMeta> = pointers.iter().map(attachment_meta).collect();
                 if is_sticker && let Some(last) = metas.last_mut() {
                     last.sticker = true;
-                    last.sticker_pack = sticker_pack.as_ref().map(|(id, key)| signal_store::StickerPackRef { id: hex::encode(id), key: hex::encode(key) });
+                    last.sticker_pack = sticker_pack.as_ref().map(|(id, key)| signal_store::StickerPackRef {
+                        id: hex::encode(id),
+                        key: hex::encode(key),
+                        sticker_id: dm.sticker.as_ref().and_then(|s| s.sticker_id),
+                    });
                 }
                 metas
             },

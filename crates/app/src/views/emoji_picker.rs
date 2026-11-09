@@ -505,8 +505,8 @@ impl EmojiPicker {
                     .child(div().flex().flex_wrap().children(stickers.into_iter().enumerate().map(
                         |(ix, (pack, sticker))| {
                             let path = sticker.path.clone();
-                            // Favoriting, from the sticker's menu (Desktop has
-                            // `markStickerAsFavorite` and no control for it yet).
+                            // Favoriting, from the sticker's menu (Desktop's
+                            // `FunPanelStickers` context menu).
                             let favorite = favorites.as_ref().map(|f| f.contains(&(pack.id.clone(), sticker.id)));
                             let menu = favorite.map(|favorite| {
                                 let (state, pack, sticker_id) = (self.state.clone(), pack.clone(), sticker.id);

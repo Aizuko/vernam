@@ -233,8 +233,9 @@ impl AppDb {
         Ok(result)
     }
 
-    /// Favorites a sticker (Desktop's `createFavoriteStickerFromStickerRef`)
-    /// at `now`, unless there are [`FAVORITE_STICKER_LIMIT`] already.
+    /// Favorites a sticker (Desktop's `addFavoriteStickerFromStickerRef`,
+    /// which revives an unfavorited one too) at `now`, unless there are
+    /// [`FAVORITE_STICKER_LIMIT`] already.
     pub async fn favorite_sticker(&self, pack_id: &str, pack_key: &str, sticker_id: u32, now: i64) -> Result<Favorited> {
         self.edit_favorites(|favorites| {
             let at = favorites.iter().position(|f| f.is(pack_id, sticker_id));

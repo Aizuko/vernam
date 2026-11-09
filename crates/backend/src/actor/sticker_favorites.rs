@@ -93,9 +93,18 @@ impl Actor {
             .collect()
     }
 
+    /// Tells the interface which stickers are favorites.
+    pub(super) async fn emit_favorite_sticker_ids(&self) {
+        match crate::stickers::favorite_sticker_ids(&self.db).await {
+            Ok(ids) => self.emit(Event::FavoriteStickerIds(ids)),
+            Err(error) => warn!(%error, "couldn't read favorite stickers"),
+        }
+    }
+
     /// Tells the interface, and downloads what favorites lack.
     pub(super) async fn favorite_stickers_changed(self: &Rc<Self>) {
         self.emit(Event::FavoriteStickers(self.favorite_sticker_views().await));
+        self.emit_favorite_sticker_ids().await;
         self.download_favorite_stickers();
     }
 
@@ -106,7 +115,12 @@ impl Actor {
         let changes = &self.favorite_downloads.local_changes;
         changes.set(changes.get() + 1);
         let changed = if favorite {
-            match self.db.favorite_sticker(&hex_id, &hex_of(&pack_key), sticker_id, now).await {
+            // The pack's key as we know it, over the one this request names
+            // (a message's could be wrong): Desktop's
+            // `addFavoriteStickerFromStickerRef` reads it from `sticker_packs`.
+            let rows = self.db.sticker_pack_rows().await.unwrap_or_default();
+            let key = rows.into_iter().find(|p| p.id == hex_id).map_or_else(|| hex_of(&pack_key), |p| p.key);
+            match self.db.favorite_sticker(&hex_id, &key, sticker_id, now).await {
                 Ok(Favorited::Added(added)) => Some(added),
                 Ok(Favorited::Already) => None,
                 Ok(Favorited::Full) => {
@@ -217,6 +231,7 @@ impl Actor {
                 let (any, more) = this.try_download_favorite_stickers().await;
                 if any {
                     this.emit(Event::FavoriteStickers(this.favorite_sticker_views().await));
+                    this.emit_favorite_sticker_ids().await;
                 }
                 if this.favorite_downloads.again.get() {
                     continue;

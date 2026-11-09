@@ -663,6 +663,7 @@ pub(crate) async fn run(
     crate::auto_download::load(&actor.db).await;
 
     if actor.store.is_registered().await {
+        actor.emit_favorite_sticker_ids().await;
         match Manager::load_registered(actor.store.clone()).await {
             Ok(manager) => actor.start_session(manager, false).await,
             Err(error) => {
@@ -2932,7 +2933,11 @@ impl Actor {
             voice: false,
             remote: None,
             thumbnail_path: None,
-            sticker_pack: Some(signal_store::StickerPackRef { id: hex::encode(&pack.id), key: hex::encode(&pack.key) }),
+            sticker_pack: Some(signal_store::StickerPackRef {
+                id: hex::encode(&pack.id),
+                key: hex::encode(&pack.key),
+                sticker_id: Some(sticker.id),
+            }),
         };
         let Some((id, mut data, timestamp)) = self.store_outgoing(&conversation, String::new(), quote, vec![meta], None).await
         else {

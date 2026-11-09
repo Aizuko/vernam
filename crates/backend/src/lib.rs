@@ -1205,6 +1205,10 @@ pub enum Event {
     /// Favorite stickers, newest first (with `Event::Stickers`, and when
     /// they change).
     FavoriteStickers(Vec<FavoriteStickerView>),
+    /// Every favorite sticker by (pack id, sticker id), including those
+    /// whose image isn't here yet (Desktop's `getIsFavoriteStickerSelector`):
+    /// at start, and after each `FavoriteStickers`.
+    FavoriteStickerIds(Vec<(Vec<u8>, u32)>),
     /// How a `Command::UploadStickerPack` is going.
     StickerUpload(sticker_upload::StickerUpload),
     /// What the sticker manager lists (answer to `Command::LoadStickerManager`).

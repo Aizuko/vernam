@@ -123,3 +123,15 @@ mod tests {
         assert!(is_blessed(&packs[0].0) && !is_blessed(&[0; 16]));
     }
 }
+
+/// Every favorite sticker by (pack id, sticker id), image or not
+/// ([`crate::Event::FavoriteStickerIds`]).
+pub(crate) async fn favorite_sticker_ids(db: &signal_store::AppDb) -> signal_store::Result<Vec<(Vec<u8>, u32)>> {
+    Ok(db
+        .favorite_stickers()
+        .await?
+        .into_iter()
+        .filter(signal_store::FavoriteSticker::is_active)
+        .filter_map(|f| Some((hex::decode(&f.pack_id).ok()?, f.sticker_id)))
+        .collect())
+}

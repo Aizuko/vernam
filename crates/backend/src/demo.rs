@@ -942,6 +942,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
         aci: SELF.trim_start_matches("d:").into(),
     });
     emit(Event::Connection(ConnectionState::Online));
+    emit(Event::FavoriteStickerIds(crate::stickers::favorite_sticker_ids(&db).await.unwrap_or_default()));
     // A made-up megaphone, with a drawn image.
     let megaphone_image = data_dir.join("attachments").join("demo-megaphone.png");
     let mut megaphone = (write_demo_sticker(&megaphone_image, 0.62).is_ok()).then(|| crate::megaphones::MegaphoneView {
@@ -1811,6 +1812,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
             Command::LoadStickers => {
                 emit(Event::Stickers(demo_stickers_installed(&db, &data_dir).await));
                 emit(Event::FavoriteStickers(demo_favorite_stickers(&db, &data_dir).await));
+                emit(Event::FavoriteStickerIds(crate::stickers::favorite_sticker_ids(&db).await.unwrap_or_default()));
             }
             // Kept as the real backend keeps them; nothing is written to
             // Storage Service.
@@ -1825,6 +1827,7 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                     emit(Event::Error(format!("failed to save the favorite sticker: {e}")));
                 }
                 emit(Event::FavoriteStickers(demo_favorite_stickers(&db, &data_dir).await));
+                emit(Event::FavoriteStickerIds(crate::stickers::favorite_sticker_ids(&db).await.unwrap_or_default()));
             }
             Command::LoadStickerManager => emit(Event::StickerManager(demo_sticker_manager(&db, &data_dir).await)),
             // The demo's stickers keep their pack on the attachment.
@@ -1906,7 +1909,11 @@ pub(crate) async fn run(db: AppDb, data_dir: PathBuf, mut commands: mpsc::Unboun
                         voice: false,
                         remote: None,
                         thumbnail_path: None,
-                        sticker_pack: Some(signal_store::StickerPackRef { id: hex::encode(&pack.id), key: hex::encode(&pack.key) }),
+                        sticker_pack: Some(signal_store::StickerPackRef {
+                            id: hex::encode(&pack.id),
+                            key: hex::encode(&pack.key),
+                            sticker_id: Some(sticker.id),
+                        }),
                     }],
                     link_preview: None,
                     expires_in: 0,

@@ -313,11 +313,15 @@ pub struct AttachmentMeta {
     pub sticker_pack: Option<StickerPackRef>,
 }
 
-/// A sticker's pack, by its hex id and key (as `StickerPackRow` has them).
+/// A sticker's pack, by its hex id and key (as `StickerPackRow` has them),
+/// and the sticker's id in it (Desktop's `message.sticker`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StickerPackRef {
     pub id: String,
     pub key: String,
+    /// `None` for messages stored before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker_id: Option<u32>,
 }
 
 /// How a call went.

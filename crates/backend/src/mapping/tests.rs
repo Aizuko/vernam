@@ -1760,7 +1760,7 @@ fn stickers_name_their_pack_and_syncs_install_packs() {
     assert!(attachment.sticker);
     assert_eq!(
         attachment.sticker_pack,
-        Some(signal_store::StickerPackRef { id: "01".repeat(16), key: "02".repeat(32) })
+        Some(signal_store::StickerPackRef { id: "01".repeat(16), key: "02".repeat(32), sticker_id: Some(3) })
     );
 
     use sync_message::{StickerPackOperation, sticker_pack_operation::Type};
