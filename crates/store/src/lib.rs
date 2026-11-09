@@ -2820,19 +2820,27 @@ impl AppDb {
     /// Best-known display names for people (Storage Service name, 1:1 chat
     /// title, or the name on their latest message), for @mentions.
     pub async fn display_names(&self, service_ids: &[String]) -> Result<Vec<(String, String)>> {
+        // One source at a time, stopping at the first that knows them. A
+        // single `UNION ALL … ORDER BY rank` ran every branch, and the
+        // messages one tested `author`, which has no index: a scan of every
+        // message per person (over a second on a real account).
+        // `author_key` is the author for their messages and uses
+        // `messages_author (author_key, sent_at)`.
+        const SOURCES: [&str; 3] = [
+            "SELECT name FROM contact_names WHERE service_id = ?1",
+            "SELECT title FROM conversations WHERE id = 'd:' || ?1 AND title != ''",
+            "SELECT author_name FROM messages WHERE author_key = ?1 AND author_name IS NOT NULL \
+             ORDER BY sent_at DESC LIMIT 1",
+        ];
         let mut out = Vec::with_capacity(service_ids.len());
         for sid in service_ids {
-            let name: Option<String> = sqlx::query_scalar(
-                "SELECT name FROM ( \
-                    SELECT name, 1 AS rank FROM contact_names WHERE service_id = ?1 \
-                    UNION ALL SELECT title, 2 FROM conversations WHERE id = 'd:' || ?1 AND title != '' \
-                    UNION ALL SELECT author_name, 3 FROM (SELECT author_name FROM messages \
-                        WHERE author = ?1 AND author_name IS NOT NULL ORDER BY sent_at DESC LIMIT 1) \
-                 ) ORDER BY rank LIMIT 1",
-            )
-            .bind(sid)
-            .fetch_optional(&self.pool)
-            .await?;
+            let mut name = None;
+            for source in SOURCES {
+                name = sqlx::query_scalar::<_, String>(source).bind(sid).fetch_optional(&self.pool).await?;
+                if name.is_some() {
+                    break;
+                }
+            }
             if let Some(name) = name {
                 out.push((sid.clone(), name));
             }

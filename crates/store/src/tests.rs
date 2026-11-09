@@ -655,6 +655,26 @@ async fn nicknames_follow_storage_and_local_edits() {
 }
 
 #[tokio::test]
+async fn display_names_take_the_first_source_that_knows_them() {
+    let db = test_db().await;
+    db.replace_contact_names(&[("a".into(), "Saved A".into())]).await.unwrap();
+    for (id, title) in [("d:a", "Title A"), ("d:b", "Title B")] {
+        db.upsert_conversation(&conv(id), ConversationUpdate { title: Some(title.into()), ..Default::default() }).await.unwrap();
+    }
+    db.upsert_conversation(&conv("g:aa"), ConversationUpdate::default()).await.unwrap();
+    // Their latest message's name, not an older one's.
+    db.insert_received(&NewMessage { author_name: Some("Old C".into()), ..incoming("g:aa", "c", 1, "one") }, None, None).await.unwrap();
+    db.insert_received(&NewMessage { author_name: Some("New C".into()), ..incoming("g:aa", "c", 2, "two") }, None, None).await.unwrap();
+    db.insert_received(&incoming("g:aa", "a", 3, "three"), None, None).await.unwrap();
+    db.insert_received(&incoming("g:aa", "b", 4, "four"), None, None).await.unwrap();
+    let ids = ["a", "b", "c", "nobody"].map(String::from);
+    assert_eq!(
+        db.display_names(&ids).await.unwrap(),
+        [("a", "Saved A"), ("b", "Title B"), ("c", "New C")].map(|(id, name)| (id.to_owned(), name.to_owned()))
+    );
+}
+
+#[tokio::test]
 async fn rename_authors_updates_messages_and_quotes() {
     let db = test_db().await;
     let mut first = incoming("g:01", "jon", 1, "hi");
