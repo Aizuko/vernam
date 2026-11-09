@@ -393,9 +393,17 @@ fn editable_item(id: &'static str, edit_label: &'static str, content: AnyElement
 }
 
 /// The photo Desktop shows for `avatar` (none: the initials).
+/// Its initials come from the draft's name as the sent contact's will
+/// (Desktop's `getContactInitials`), else the contact's title.
 fn draft_avatar(picked: &Picked, avatar: Option<&share_contact::AvatarOption>, size: f32) -> AnyElement {
-    let name = picked.candidate.title.as_str();
-    person_avatar(avatar.map(|a| std::path::Path::new(a.path.as_str())), name, picked.color, px(size))
+    let draft = &picked.draft;
+    let name = draft
+        .name
+        .as_ref()
+        .and_then(|n| signal_store::combine_names(&n.given, &n.family).or_else(|| n.full()))
+        .or_else(|| draft.organization.clone().filter(|o| !o.is_empty()))
+        .unwrap_or_else(|| picked.candidate.title.clone());
+    person_avatar(avatar.map(|a| std::path::Path::new(a.path.as_str())), &name, picked.color, px(size))
 }
 
 fn photo_label(avatar: Option<&share_contact::AvatarOption>) -> &'static str {

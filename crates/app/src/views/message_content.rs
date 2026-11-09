@@ -56,7 +56,7 @@ fn e164_digits(value: &str) -> Option<String> {
 }
 
 fn contact_avatar(contact: &SharedContact, size: f32) -> AnyElement {
-    let name = contact.display_name().unwrap_or_default();
+    let name = contact.initials_name().unwrap_or_default();
     let photo = contact.avatar.as_ref().and_then(|a| a.local_path.as_deref()).map(std::path::Path::new);
     crate::views::common::person_avatar(photo, &name, CONTACT_AVATAR_COLOR, px(size))
 }

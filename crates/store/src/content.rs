@@ -64,9 +64,22 @@ pub struct SharedContact {
 }
 
 impl SharedContact {
-    /// Desktop's `getDisplayName`: given and family name, combined.
+    /// Desktop's `getFullName`: given and family name, combined; or, when
+    /// the name has a prefix, middle name or suffix, all five in order.
     pub fn display_name(&self) -> Option<String> {
+        if self.prefix.is_empty() && self.middle_name.is_empty() && self.suffix.is_empty() {
+            return combine_names(&self.given_name, &self.family_name);
+        }
+        let parts = [&self.prefix, &self.given_name, &self.middle_name, &self.family_name, &self.suffix];
+        Some(parts.into_iter().filter(|p| !p.is_empty()).map(String::as_str).collect::<Vec<_>>().join(" "))
+    }
+
+    /// What a contact's initials come from (Desktop's `getContactInitials`):
+    /// given and family name, else the full name or the organization.
+    pub fn initials_name(&self) -> Option<String> {
         combine_names(&self.given_name, &self.family_name)
+            .or_else(|| self.display_name())
+            .or_else(|| self.organization.clone().filter(|o| !o.is_empty()))
     }
 
     /// Desktop's `getDisplayNickname`: the sharer's nickname for them.

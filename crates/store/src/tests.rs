@@ -2781,6 +2781,24 @@ async fn message_content_previews_and_gift_badge_states() {
     assert_eq!(preview(db.clone()).await.as_deref(), Some("💳 You activated Payments."));
 }
 
+/// Desktop's `getFullName` and `getContactInitials` (Desktop commit
+/// cf2daf2).
+#[test]
+fn a_shared_contacts_full_name_has_every_part_it_was_given() {
+    let plain = SharedContact { given_name: "Rosa".into(), family_name: "Delgado".into(), ..Default::default() };
+    assert_eq!(plain.display_name().as_deref(), Some("Rosa Delgado"));
+    let full = SharedContact { prefix: "Dr.".into(), middle_name: "María".into(), suffix: "Jr.".into(), ..plain.clone() };
+    assert_eq!(full.display_name().as_deref(), Some("Dr. Rosa María Delgado Jr."));
+    // Initials come from the given and family name only.
+    assert_eq!(full.initials_name().as_deref(), Some("Rosa Delgado"));
+    let titled = SharedContact { prefix: "Dr.".into(), family_name: "Delgado".into(), ..Default::default() };
+    assert_eq!(titled.display_name().as_deref(), Some("Dr. Delgado"));
+    let suffix_only = SharedContact { suffix: "Jr.".into(), ..Default::default() };
+    assert_eq!(suffix_only.initials_name().as_deref(), Some("Jr."));
+    let company = SharedContact { organization: Some("Acme".into()), ..Default::default() };
+    assert_eq!((company.display_name(), company.initials_name().as_deref()), (None, Some("Acme")));
+}
+
 #[tokio::test]
 async fn deleting_a_message_clears_its_content() {
     let db = test_db().await;

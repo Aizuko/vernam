@@ -37,9 +37,14 @@ impl ContactName {
         Self { given: given.into(), ..Default::default() }
     }
 
-    /// Given and family name combined (Desktop's `getFullName`).
+    /// Desktop's `getFullName`: given and family name combined; or, with a
+    /// prefix, middle name or suffix, all five in order.
     pub fn full(&self) -> Option<String> {
-        signal_store::combine_names(&self.given, &self.family)
+        if self.prefix.is_empty() && self.middle.is_empty() && self.suffix.is_empty() {
+            return signal_store::combine_names(&self.given, &self.family);
+        }
+        let parts = [&self.prefix, &self.given, &self.middle, &self.family, &self.suffix];
+        Some(parts.into_iter().filter(|p| !p.is_empty()).map(String::as_str).collect::<Vec<_>>().join(" "))
     }
 }
 
@@ -333,6 +338,14 @@ mod tests {
     use super::*;
 
     const ACI: &str = "00000000-0000-4000-8000-0000000000f0";
+
+    #[test]
+    fn a_full_name_has_every_part_it_was_given() {
+        let name = ContactName { given: "Rosa".into(), family: "Delgado".into(), ..Default::default() };
+        assert_eq!(name.full().as_deref(), Some("Rosa Delgado"));
+        let titled = ContactName { prefix: "Dr.".into(), middle: "María".into(), suffix: "Jr.".into(), ..name };
+        assert_eq!(titled.full().as_deref(), Some("Dr. Rosa María Delgado Jr."));
+    }
 
     fn sample() -> ShareContactDraft {
         let avatar = AvatarOption { path: "/tmp/avatar.jpg".into(), is_profile: false };
