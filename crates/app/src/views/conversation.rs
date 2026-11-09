@@ -7450,8 +7450,6 @@ mod tests {
         backend.shutdown();
     }
 
-    // ffmpeg draws these on Linux; ignored until the Linux audio lands.
-    #[cfg_attr(target_os = "linux", ignore)]
     #[gpui_kit::test]
     fn a_voice_message_shows_its_waveform(cx: &mut TestAppContext) {
         let (backend, _dir) = demo_backend(cx);
