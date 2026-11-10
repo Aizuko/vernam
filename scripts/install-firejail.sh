@@ -43,7 +43,7 @@ chmod +x "$HOME/.local/bin/vernam"
 # profile's header).
 mkdir -p "$config/firejail"
 cp scripts/vernam.profile "$config/firejail/vernam.profile"
-echo "whitelist \$HOME/.local/bin/vernam.bin" >> "$config/firejail/vernam.profile"
+echo 'whitelist ${HOME}/.local/bin/vernam.bin' >> "$config/firejail/vernam.profile"
 
 # What register_desktop writes on an unjailed launch, with the wrapper
 # (which jails) in Exec.
