@@ -10,9 +10,8 @@
 
 # Sandbox shape: capabilities dropped, no new privileges or setuid, no
 # /dev/input (Wayland input goes through the compositor anyway), no X11
-# (x11 none refuses the launch when an abstract X11 socket is reachable
-# in the jail; if your Xwayland still opens one, this line has to go),
-# only unix, internet and netlink sockets (netlink for interface
+# (the path socket is blacklisted below; see there for the abstract
+# one), only unix, internet and netlink sockets (netlink for interface
 # enumeration, which call setup needs), seccomp, no new user namespaces,
 # private IPC, a private /dev, which keeps dri, snd and video capture
 # for calls but on proprietary NVIDIA hosts leaves out the nvidia nodes
@@ -31,7 +30,17 @@ seccomp
 restrict-namespaces
 private-tmp
 private-dev
-x11 none
+# X11: the path socket under /tmp/.X11-unix is blacklisted (this wins
+# over the whitelist private-tmp adds for the display server). The
+# abstract socket compositors' Xwayland listens on by default can only
+# be hidden by a network namespace, and x11 none refuses the launch
+# without one: net none would cut the internet, and a namespace with
+# connectivity needs host-side bridge setup. So the abstract socket
+# stays reachable and the app has to simply not use it, which GPUI
+# does not: it picks Wayland whenever WAYLAND_DISPLAY is set and opens
+# no X11 connection then (gpui-pre-linux display_connection.rs). With
+# the network expendable, add net none and x11 none for the full block.
+blacklist /tmp/.X11-unix
 # No netfilter: its default rules fence the UDP ports calls use, and
 # calls are the one thing this client does besides text.
 
