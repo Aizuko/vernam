@@ -78,7 +78,10 @@ whitelist ${RUNUSER}/wayland-?
 # below: what Vernam owns (data, the hand-off socket for sgnl:// links,
 # the logs under it), the font and shader caches the graphics stack
 # keeps there, and Downloads for the file dialogs (attach and save-as).
-# Nothing of the desktop registration is whitelisted: autostart entries
+# The data directory is ~/.local/share/vernam: the directories crate's
+# Linux ProjectDirs ignores the io.github.knpwrs qualifier and
+# lowercases the app name (lin.rs, project_dirs_from). Nothing of the
+# desktop registration is whitelisted: autostart entries
 # and Exec= lines are host-execution mechanisms that outlive the
 # sandbox, so the host copies are written by unjailed launches only
 # (register_desktop runs on every launch; from inside the jail its
@@ -90,12 +93,12 @@ whitelist ${RUNUSER}/wayland-?
 mkdir ${HOME}/.local
 mkdir ${HOME}/.local/share
 mkdir ${HOME}/.cache
-mkdir ${HOME}/.local/share/io.github.knpwrs.Vernam
+mkdir ${HOME}/.local/share/vernam
 mkdir ${HOME}/.cache/fontconfig
 mkdir ${HOME}/.cache/mesa_shader_cache
 mkdir ${HOME}/.cache/mesa_shader_cache_db
 mkdir ${HOME}/Downloads
-whitelist ${HOME}/.local/share/io.github.knpwrs.Vernam
+whitelist ${HOME}/.local/share/vernam
 whitelist ${HOME}/.cache/fontconfig
 whitelist ${HOME}/.cache/mesa_shader_cache
 whitelist ${HOME}/.cache/mesa_shader_cache_db
