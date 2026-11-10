@@ -6,7 +6,7 @@
 FROM debian:trixie
 
 # ffmpeg and a hunspell dictionary are for the tests, which the README's
-# `./build.sh test --workspace` runs: without them the media and spell
+# `./build-linux.sh test --workspace` runs: without them the media and spell
 # check tests skip themselves, quietly running less than the native path.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

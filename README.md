@@ -45,7 +45,7 @@ Where Signal's server turns features on or sets limits through remote config, th
 | `crates/emoji` | The emoji table and search index, generated at build time from emojibase |
 | `vendor/` | presage and libsignal-service-rs with the changes this app needs, such as receiving and sending stories (`vendor/README.md`) |
 
-## Running
+## Running - macOS
 
 Building needs `cmake` (BoringSSL, for contact discovery) and `protoc` (RingRTC and libsignal's `spqr`), and GIFs and video posters need `ffmpeg`: `brew install cmake ffmpeg`, then `mise install` for the `protoc` pinned in `mise.toml`. mise's `protoc` is the upstream release binary; Homebrew's links Homebrew's abseil and stops starting when abseil upgrades ahead of it. The first build downloads Signal's prebuilt WebRTC (about 28 MB) into `target/webrtc`.
 
@@ -60,9 +60,23 @@ Each account's data is in `accounts/<id>/` in the data directory, beside the app
 
 macOS only shows notifications, and only grants camera and microphone access, to an app bundle. `cargo run` runs the app from `target/<profile>/Vernam.app`; for a build you start yourself, `scripts/bundle.sh` makes the bundle. `mise run bundle` does both: it builds release and makes `target/release/Vernam.app`.
 
-Linux runs the same app. The build needs the GPUI system packages and the tools macOS needs anyway (Debian's names): `apt install build-essential cmake pkg-config protobuf-compiler libprotobuf-dev python3 clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libudev-dev libasound2-dev ffmpeg` (python3 fetches RingRTC's prebuilt WebRTC). Or with nothing on the host but podman: `./build.sh` builds in a container (rootless podman is fine) and the binary lands in `target/linux/release/vernam`, kept apart from a macOS checkout's `target/release`; the binary is a Debian 13 build, so the machine running it needs that glibc, with ffmpeg there at run time. Words after the script go to cargo, as `./build.sh test --workspace`. A minimal firejail profile for Wayland sessions ships as `scripts/vernam.profile` (`firejail --profile=scripts/vernam.profile target/linux/release/vernam`): inside the jail the home directory reads as empty except for Vernam's data, the font and shader caches and Downloads, only the compositor, audio and bus sockets of `/run/user` are visible, the session bus is filtered down to notifications and the portals the file dialogs use (which needs `xdg-dbus-proxy` installed), and the X11 path socket is hidden. The abstract socket a compositor's XWayland listens on stays reachable (hiding it needs a network namespace, a plain one cutting the network and a bridged one needing host setup, or `-nolisten local` in the X server options), but GPUI picks Wayland whenever `WAYLAND_DISPLAY` names the session and never opens an X11 connection; `x11 none` would refuse the launch without a namespace, so the profile does not use it. Attachments in the jail come from Downloads: the file dialogs resolve inside it, and pastes and drops too when the file already sits there; the unread badge does not pass the bus filter; and the desktop entry and sgnl:// handler are written by unjailed launches only, so register with the first launch outside the jail. ffmpeg plays media at run time here, decoding what macOS gets from the system's frameworks, and `libasound2` is the microphone. The database key lives in a file beside the data, not a keychain. Notifications go through a freedesktop notification daemon (Plasma's offer a reply field; most others don't), spell check uses an installed hunspell dictionary such as `hunspell-en-us`, the unread count reaches shells that read Unity's launcher API, and screen sharing is macOS only for now. The first launch writes a desktop file with icons (`~/.local/share/applications/io.github.knpwrs.vernam.desktop`), which registers Vernam as a `sgnl://` handler; opening a link starts Vernam or hands the link to the one already running.
-
 GIF search needs your own Giphy API key (free at developers.giphy.com), pasted in the GIFs tab or set as `GIPHY_API_KEY`. Signal Desktop's key belongs to Signal, so it isn't used here.
+
+## Running - Linux
+
+Building requires podman installed, no additional tools. Playing media needs ffmpeg at run time (`sudo apt install ffmpeg`).
+
+```bash
+./build-linux.sh
+./target/linux/release/vernam
+```
+
+If you'd like to use the firejail profile for additional isolation:
+
+```bash
+./scripts/install-firejail.sh    # installs to ~/.local/bin; rerun after each build
+vernam                           # jailed; so are the app menu and sgnl:// links
+```
 
 ## Tests
 

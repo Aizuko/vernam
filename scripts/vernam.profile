@@ -7,6 +7,15 @@
 # lines below have to follow it. The executable also has to be visible
 # inside the jail: when the checkout lives under home, run a copy from
 # outside it (say /usr/local/bin) or whitelist the checkout directory.
+#
+# `scripts/install-firejail.sh` installs this profile as
+# ~/.config/firejail/vernam.profile, the built binary as
+# ~/.local/bin/vernam.bin (whitelisted in the installed copy: the jail
+# hides the checkout under home), and a ~/.local/bin/vernam wrapper
+# that launches it with this profile, so the terminal, the app menu
+# and sgnl:// links all run jailed. It also writes the desktop entry
+# and icons the app's own registration can't (its writes vanish with
+# the jail), with the wrapper in the Exec line.
 
 # Sandbox shape: capabilities dropped, no new privileges or setuid, no
 # /dev/input (Wayland input goes through the compositor anyway), no X11

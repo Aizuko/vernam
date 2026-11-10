@@ -6,7 +6,7 @@
 # container's root is your user).
 #
 # Extra words go to cargo in the container instead of the default build:
-#   ./build.sh test --workspace
+#   ./build-linux.sh test --workspace
 set -eu
 
 cd "$(dirname "$0")"
